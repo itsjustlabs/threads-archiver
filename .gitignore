@@ -1,0 +1,23 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Environment / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Personal archive data — exports contain your saved posts and media
+threads-archive-*.zip
+threads-archive-*.json
+archive.json
+data.js
+downloads/
+*.tar.gz
+
+# Editors
+.vscode/
+.idea/
+
+# Node (api/server.js is zero-dep, but just in case)
+node_modules/

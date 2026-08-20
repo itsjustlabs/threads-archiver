@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Archive — Threads Archiver</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0d0d0d;
+      --surface: #141414;
+      --card:    #1a1a1a;
+      --border:  #2e2e2e;
+      --text:    #f0ece8;
+      --muted:   #8a8a8a;
+      --accent:  #0095f6;
+      --link:    #4ab3fa;
+      --danger:  #e74c3c;
+      --warn:    #e8c96a;
+      --radius:  12px;
+      --col:     680px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+      padding-bottom: 80px;
+    }
+
+    .container { max-width: var(--col); margin: 0 auto; padding: 0 16px; }
+
+    /* ── sticky header ── */
+    .page-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(13, 13, 13, .92);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 0 10px;
+      margin-bottom: 20px;
+    }
+    .page-header .container {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .title-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .title-row h1 { font-size: 18px; font-weight: 700; }
+    .title-row .count { font-size: 13px; color: var(--muted); }
+
+    .toolbar { display: flex; gap: 8px; }
+    .search-input {
+      flex: 1;
+      min-width: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 8px 12px;
+      outline: none;
+    }
+    .search-input:focus { border-color: var(--accent); }
+    .search-input::placeholder { color: var(--muted); }
+    .sort-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 8px 8px;
+      outline: none;
+      cursor: pointer;
+    }
+    .filter-btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      padding: 8px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .filter-btn:hover { border-color: var(--warn); }
+    .filter-btn.active {
+      border-color: var(--warn);
+      color: var(--warn);
+      background: rgba(232, 201, 106, .08);
+    }
+
+    /* ── timeline ── */
+    .month-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      padding: 18px 0 8px;
+    }
+
+    .card {
+      display: block;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      text-decoration: none;
+      color: inherit;
+    }
+    .card:hover { border-color: #4a4a4a; }
+    .card.has-missing { box-shadow: inset 3px 0 0 var(--warn); }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .avatar, .avatar-ph {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--border);
+      object-fit: cover;
+    }
+    .avatar-ph {
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; font-weight: 700; color: var(--muted);
+    }
+    .who { min-width: 0; }
+    .who .name {
+      font-size: 14px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .who .handle { font-size: 12px; color: var(--muted); }
+    .card-date {
+      margin-left: auto;
+      flex-shrink: 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .card-text {
+      font-size: 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .thumbs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 8px;
+      min-height: 0;
+    }
+    .thumbs img {
+      height: 92px;
+      width: auto;
+      max-width: 160px;
+      object-fit: cover;
+      border-radius: 8px;
+      background: var(--border);
+    }
+    .thumb-more {
+      height: 92px; width: 56px;
+      border-radius: 8px;
+      background: var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; color: var(--muted);
+    }
+
+    .card-stats {
+      display: flex;
+      gap: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    .card-stats .warn { color: var(--warn); }
+
+    .empty-note {
+      text-align: center;
+      color: var(--muted);
+      font-size: 14px;
+      padding: 60px 20px;
+      line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <div class="page-header">
+    <div class="container">
+      <div class="title-row">
+        <h1>Threads Archive</h1>
+        <span class="count" id="countLabel"></span>
+      </div>
+      <div class="toolbar">
+        <input class="search-input" id="searchInput" type="search"
+               placeholder="Search text, @user, replies…" autocomplete="off">
+        <select class="sort-select" id="sortSelect" title="Sort order">
+          <option value="newest">Newest</option>
+          <option value="oldest">Oldest</option>
+          <option value="updated">Recently updated</option>
+          <option value="archived">Recently archived</option>
+        </select>
+        <button class="filter-btn" id="missingFilter"
+                title="Show only threads with missing media">⚠</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <div id="timeline"></div>
+  </div>
+
+  <script src="archive.js" type="module"></script>
+</body>
+</html>

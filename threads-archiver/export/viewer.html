@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Threads Archive</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:#0d0d0d; --surface:#141414; --card:#1a1a1a; --border:#2e2e2e;
+      --text:#f0ece8; --muted:#8a8a8a; --accent:#0095f6; --link:#4ab3fa;
+      --warn:#e8c96a; --radius:12px; --col:680px;
+    }
+    body {
+      background:var(--bg); color:var(--text); line-height:1.5; padding-bottom:80px;
+      font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    }
+    a { color:var(--link); }
+    .container { max-width:var(--col); margin:0 auto; padding:0 16px; }
+
+    .page-header {
+      position:sticky; top:0; z-index:10;
+      background:rgba(13,13,13,.92); backdrop-filter:blur(8px);
+      border-bottom:1px solid var(--border); padding:14px 0 10px; margin-bottom:20px;
+    }
+    .page-header .container { display:flex; flex-direction:column; gap:10px; }
+    .title-row { display:flex; align-items:baseline; gap:10px; }
+    .title-row h1 { font-size:18px; font-weight:700; }
+    .title-row .count { font-size:13px; color:var(--muted); }
+    .toolbar { display:flex; gap:8px; }
+    .search-input {
+      flex:1; min-width:0; background:var(--surface); border:1px solid var(--border);
+      border-radius:8px; color:var(--text); font-size:13px; padding:8px 12px; outline:none;
+    }
+    .search-input:focus { border-color:var(--accent); }
+    .sort-select {
+      background:var(--surface); border:1px solid var(--border); border-radius:8px;
+      color:var(--text); font-size:13px; padding:8px; outline:none; cursor:pointer;
+    }
+    .filter-btn {
+      background:var(--surface); border:1px solid var(--border); border-radius:8px;
+      color:var(--muted); font-size:13px; padding:8px 10px; cursor:pointer; white-space:nowrap;
+    }
+    .filter-btn.active { border-color:var(--warn); color:var(--warn); background:rgba(232,201,106,.08); }
+
+    .month-label {
+      font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+      color:var(--muted); padding:18px 0 8px;
+    }
+    .card {
+      display:block; background:var(--card); border:1px solid var(--border);
+      border-radius:var(--radius); padding:16px; margin-bottom:10px; cursor:pointer;
+      text-decoration:none; color:inherit;
+    }
+    .card:hover { border-color:#4a4a4a; }
+    .card.has-missing { box-shadow:inset 3px 0 0 var(--warn); }
+    .card-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+    .avatar, .avatar-ph {
+      width:40px; height:40px; border-radius:50%; flex-shrink:0;
+      background:var(--border); object-fit:cover;
+    }
+    .avatar-ph { display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:700; color:var(--muted); }
+    .who { min-width:0; }
+    .who .name { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .who .handle { font-size:12px; color:var(--muted); }
+    .card-date { margin-left:auto; flex-shrink:0; font-size:12px; color:var(--muted); }
+    .card-text {
+      font-size:14px; line-height:1.55; white-space:pre-wrap; word-break:break-word;
+      display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden;
+      margin-bottom:8px;
+    }
+    .thumbs { display:flex; gap:4px; margin-bottom:8px; }
+    .thumbs img { height:92px; width:auto; max-width:160px; object-fit:cover; border-radius:8px; background:var(--border); }
+    .thumb-more { height:92px; width:56px; border-radius:8px; background:var(--border); display:flex; align-items:center; justify-content:center; font-size:13px; color:var(--muted); }
+    .card-stats { display:flex; gap:14px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+    .card-stats .warn { color:var(--warn); }
+    .empty-note { text-align:center; color:var(--muted); font-size:14px; padding:60px 20px; line-height:1.7; white-space:pre-line; }
+
+    /* thread view */
+    .back-btn { display:inline-block; color:var(--muted); font-size:14px; margin-bottom:20px; text-decoration:none; }
+    .back-btn:hover { color:var(--text); }
+    .thread-header {
+      background:var(--card); border:1px solid var(--border);
+      border-radius:var(--radius); padding:20px; margin-bottom:4px;
+    }
+    .author-row { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+    .author-row .avatar, .author-row .avatar-ph { width:48px; height:48px; font-size:18px; }
+    .author-info .name { font-size:15px; font-weight:700; }
+    .author-info .handle { font-size:13px; color:var(--muted); }
+    .post-date { font-size:12px; color:var(--muted); margin-bottom:14px; }
+    .plain-link { color:inherit; text-decoration:none; }
+    .plain-link:hover { text-decoration:underline; }
+    .part-author { display:flex; align-items:baseline; gap:8px; margin-bottom:4px; }
+    .part-author .p-name { font-size:14px; font-weight:600; }
+    .part-author .p-handle { font-size:12px; color:var(--muted); }
+    .post-text {
+      font-size:16px; line-height:1.6; white-space:pre-wrap; word-break:break-word; margin-bottom:12px;
+    }
+    .post-text a, .reply-text a { text-decoration:none; }
+    .post-text a:hover, .reply-text a:hover { text-decoration:underline; }
+    a.tag {
+      display:inline-block; background:rgba(0,149,246,.12); color:var(--link);
+      border-radius:6px; padding:0 6px; line-height:1.45;
+    }
+    .thread-part { position:relative; padding-left:60px; margin-bottom:2px; }
+    .thread-part::before { content:''; position:absolute; left:23px; top:0; bottom:0; width:2px; background:var(--border); }
+    .thread-part:last-of-type::before { display:none; }
+    .thread-part-avatar {
+      position:absolute; left:0; top:0; width:46px; height:46px; border-radius:50%;
+      background:var(--border); display:flex; align-items:center; justify-content:center;
+      font-size:16px; font-weight:700; color:var(--muted); overflow:hidden;
+    }
+    .thread-part-avatar img { width:100%; height:100%; object-fit:cover; }
+    .media-grid { display:grid; gap:3px; border-radius:10px; overflow:hidden; margin-bottom:12px; }
+    .media-grid.count-1 { grid-template-columns:1fr; }
+    .media-grid.count-2, .media-grid.count-3, .media-grid.count-4 { grid-template-columns:1fr 1fr; }
+    .media-grid.count-3 .media-item:first-child { grid-column:1 / -1; }
+    .media-item { position:relative; background:var(--border); overflow:hidden; aspect-ratio:1; }
+    .media-grid.count-1 .media-item { aspect-ratio:unset; max-height:480px; }
+    .media-item img, .media-item video { width:100%; height:100%; object-fit:cover; display:block; }
+    .media-grid.count-1 .media-item img, .media-grid.count-1 .media-item video { object-fit:contain; background:#000; }
+    .media-expired { display:flex; align-items:center; justify-content:center; }
+    .media-expired-inner { text-align:center; font-size:12px; color:var(--muted); padding:12px; position:relative; z-index:1; }
+    .post-stats { display:flex; gap:20px; font-size:13px; color:var(--muted); padding-top:12px; border-top:1px solid var(--border); margin-top:12px; }
+    .media-repair-banner {
+      margin-top:12px; padding:10px 12px; background:#2a2210; border:1px solid #6b5518;
+      border-radius:8px; font-size:12px; color:var(--warn);
+    }
+    .section-label {
+      font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+      color:var(--muted); padding:20px 0 8px; display:flex; justify-content:space-between; align-items:baseline;
+    }
+    .collapse-all { background:none; border:none; color:var(--muted); font-size:11px; text-transform:none; letter-spacing:normal; cursor:pointer; }
+    .collapse-all:hover { color:var(--accent); }
+    .reply-card { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:16px; margin-bottom:8px; }
+    .reply-author { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    .reply-avatar {
+      width:32px; height:32px; border-radius:50%; background:var(--border); flex-shrink:0;
+      display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700;
+      color:var(--muted); overflow:hidden;
+    }
+    .reply-avatar img { width:100%; height:100%; object-fit:cover; }
+    .reply-name { font-size:13px; font-weight:600; }
+    .reply-handle { font-size:12px; color:var(--muted); }
+    .reply-date { font-size:11px; color:var(--muted); margin-left:auto; }
+    .reply-toggle { background:none; border:none; color:var(--muted); font-size:13px; cursor:pointer; padding:2px 4px; margin-left:6px; }
+    .reply-toggle:hover { color:var(--text); }
+    .reply-text { font-size:14px; line-height:1.55; white-space:pre-wrap; word-break:break-word; }
+    .reply-stats { margin-top:10px; font-size:12px; color:var(--muted); white-space:pre; }
+    .reply-card.collapsed .reply-text {
+      display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden;
+      white-space:normal; color:var(--muted); font-size:13px;
+    }
+    .reply-card.collapsed .media-grid, .reply-card.collapsed .reply-stats { display:none; }
+    .no-replies { text-align:center; padding:24px; font-size:13px; color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="data.js"></script>
+  <script>
+  'use strict';
+  const DATA    = window.ARCHIVE_DATA ?? { threads: [], media: [] };
+  const THREADS = DATA.threads ?? [];
+  const MEDIA   = Object.fromEntries((DATA.media ?? []).map(m => [m.id, m]));
+  const app     = document.getElementById('app');
+
+  let _query = '', _sort = 'newest', _onlyMissing = false;
+
+  window.addEventListener('hashchange', route);
+  route();
+
+  function route() {
+    const m = location.hash.match(/^#\/t\/(.+)$/);
+    if (m) renderThread(decodeURIComponent(m[1]));
+    else renderTimeline();
+  }
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+  function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function mediaFile(id) { return id && MEDIA[id]?.file ? MEDIA[id].file : null; }
+  function el(tag, cls, html) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (html != null) e.innerHTML = html;
+    return e;
+  }
+  function relativeTime(ms) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s/60) + 'm ago';
+    if (s < 86400) return Math.floor(s/3600) + 'h ago';
+    if (s < 86400*7) return Math.floor(s/86400) + 'd ago';
+    if (s < 86400*30) return Math.floor(s/(86400*7)) + 'w ago';
+    return new Date(ms).toLocaleDateString();
+  }
+  function formatDate(ms) {
+    return new Date(ms).toLocaleString(undefined, { weekday:'long', year:'numeric', month:'long', day:'numeric', hour:'2-digit', minute:'2-digit' });
+  }
+  function lastActivity(t) {
+    if (t.lastActivityAt) return t.lastActivityAt;
+    let latest = t.takenAt ?? 0;
+    for (const r of t.replies ?? []) if ((r.takenAt ?? 0) > latest) latest = r.takenAt;
+    return latest;
+  }
+  function missingCount(t) {
+    let n = 0;
+    const miss = r => !r.archivedId || !MEDIA[r.archivedId];
+    for (const it of t.threadItems ?? []) for (const r of [...(it.images??[]), ...(it.videos??[])]) if (miss(r)) n++;
+    for (const rep of t.replies ?? []) for (const r of rep.images ?? []) if (miss(r)) n++;
+    return n;
+  }
+  function linkify(raw) {
+    const text = String(raw ?? '');
+    const re = /https?:\/\/[^\s<>"']+|(?<![\p{L}\p{N}_@#])@[\p{L}\p{N}][\p{L}\p{N}._]*|(?<![\p{L}\p{N}_@#])#[\p{L}\p{N}][\p{L}\p{N}_]*/gu;
+    let out = '', last = 0;
+    for (const m of text.matchAll(re)) {
+      out += esc(text.slice(last, m.index));
+      const tok = m[0];
+      if (tok.startsWith('http')) {
+        const url = tok.replace(/[)\].,!?;:]+$/, ''); const trail = tok.slice(url.length);
+        out += '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(url) + '</a>' + esc(trail);
+      } else if (tok.startsWith('@')) {
+        const user = tok.slice(1).replace(/\.+$/, ''); const trail = tok.slice(1 + user.length);
+        out += '<a href="https://www.threads.com/@' + encodeURIComponent(user) + '" target="_blank" rel="noopener">@' + esc(user) + '</a>' + esc(trail);
+      } else {
+        const tag = tok.slice(1);
+        out += '<a class="tag" href="https://www.threads.com/search?q=' + encodeURIComponent('#' + tag) + '&serp_type=tags" target="_blank" rel="noopener">#' + esc(tag) + '</a>';
+      }
+      last = m.index + tok.length;
+    }
+    return out + esc(text.slice(last));
+  }
+  function avatarEl(file, fallbackChar, cls) {
+    if (file) {
+      const img = el('img', cls);
+      img.src = file;
+      return img;
+    }
+    return el('div', cls === 'avatar' ? 'avatar-ph' : cls, esc((fallbackChar || '?')[0].toUpperCase()));
+  }
+
+  // ── timeline ───────────────────────────────────────────────────────────────
+  function renderTimeline() {
+    document.title = 'Threads Archive';
+    app.innerHTML = '';
+
+    const header = el('div', 'page-header');
+    const hc = el('div', 'container');
+    const titleRow = el('div', 'title-row');
+    titleRow.appendChild(el('h1', null, 'Threads Archive'));
+    const count = el('span', 'count');
+    titleRow.appendChild(count);
+    hc.appendChild(titleRow);
+
+    const toolbar = el('div', 'toolbar');
+    const search = el('input', 'search-input');
+    search.type = 'search'; search.placeholder = 'Search text, @user, replies…'; search.value = _query;
+    const sort = el('select', 'sort-select', `
+      <option value="newest">Newest</option><option value="oldest">Oldest</option>
+      <option value="updated">Recently updated</option><option value="archived">Recently archived</option>`);
+    sort.value = _sort;
+    const missBtn = el('button', 'filter-btn' + (_onlyMissing ? ' active' : ''), '⚠');
+    missBtn.title = 'Show only threads with missing media';
+    toolbar.append(search, sort, missBtn);
+    hc.appendChild(toolbar);
+    header.appendChild(hc);
+    app.appendChild(header);
+
+    const body = el('div', 'container');
+    const list = el('div');
+    body.appendChild(list);
+    app.appendChild(body);
+
+    let deb = null;
+    search.addEventListener('input', () => {
+      clearTimeout(deb);
+      deb = setTimeout(() => { _query = search.value.trim().toLowerCase(); draw(); }, 150);
+    });
+    sort.addEventListener('change', () => { _sort = sort.value; draw(); });
+    missBtn.addEventListener('click', () => {
+      _onlyMissing = !_onlyMissing;
+      missBtn.classList.toggle('active', _onlyMissing);
+      draw();
+    });
+
+    function sortTs(t) {
+      if (_sort === 'updated') return lastActivity(t);
+      if (_sort === 'archived') return Math.floor((t.archivedAt ?? 0) / 1000);
+      return t.takenAt ?? 0;
+    }
+
+    function draw() {
+      let items = THREADS.filter(t => {
+        if (_onlyMissing && missingCount(t) === 0) return false;
+        if (!_query) return true;
+        const hay = [t.text, t.username, t.displayName,
+          ...(t.threadItems ?? []).map(i => i.text),
+          ...(t.replies ?? []).flatMap(r => [r.text, r.username]),
+        ].filter(Boolean).join('\n').toLowerCase();
+        return hay.includes(_query);
+      });
+      items.sort((a, b) => _sort === 'oldest' ? sortTs(a) - sortTs(b) : sortTs(b) - sortTs(a));
+
+      count.textContent = (_query || _onlyMissing)
+        ? items.length + ' of ' + THREADS.length + ' saves' : THREADS.length + ' saves';
+
+      list.innerHTML = '';
+      if (!items.length) {
+        list.appendChild(el('div', 'empty-note', THREADS.length ? 'Nothing matches the current search / filter.' : 'This archive is empty.'));
+        return;
+      }
+
+      let lastMonth = null;
+      for (const t of items) {
+        const month = new Date(sortTs(t) * 1000).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+        if (month !== lastMonth) { lastMonth = month; list.appendChild(el('div', 'month-label', esc(month))); }
+        list.appendChild(buildCard(t, sortTs(t)));
+      }
+    }
+    draw();
+  }
+
+  function buildCard(t, ts) {
+    const miss = missingCount(t);
+    const card = el('a', 'card' + (miss ? ' has-missing' : ''));
+    card.href = '#/t/' + encodeURIComponent(t.code);
+
+    const head = el('div', 'card-head');
+    head.appendChild(avatarEl(mediaFile(t.profilePicId), t.displayName || t.username, 'avatar'));
+    head.appendChild(el('div', 'who',
+      '<div class="name">' + esc(t.displayName || t.username) + '</div>' +
+      '<div class="handle">@' + esc(t.username) + '</div>'));
+    const date = el('div', 'card-date', esc(relativeTime(ts * 1000)));
+    date.title = new Date((t.takenAt ?? 0) * 1000).toLocaleString();
+    head.appendChild(date);
+    card.appendChild(head);
+
+    if (t.text) card.appendChild(el('div', 'card-text', esc(t.text)));
+
+    // thumbs: first 3 root-post media (images + video posters)
+    const refs = [];
+    for (const it of t.threadItems ?? []) {
+      for (const r of it.images ?? []) refs.push(mediaFile(r.archivedId));
+      for (const r of it.videos ?? []) refs.push(mediaFile(r.posterId) ?? mediaFile(r.archivedId));
+    }
+    const files = refs.filter(Boolean);
+    if (files.length) {
+      const thumbs = el('div', 'thumbs');
+      for (const f of files.slice(0, 3)) {
+        const img = el('img');
+        img.src = f; img.loading = 'lazy';
+        thumbs.appendChild(img);
+      }
+      if (refs.length > 3) thumbs.appendChild(el('div', 'thumb-more', '+' + (refs.length - 3)));
+      card.appendChild(thumbs);
+    }
+
+    const bits = ['♥ ' + (t.likeCount ?? 0)];
+    if ((t.replyCount ?? 0) > 0) bits.push('💬 ' + t.replyCount);
+    if ((t.replies?.length ?? 0) > 0) bits.push(t.replies.length + ' archived');
+    if (t.sourceParent) bits.push('↳ from a reply');
+    let statsHtml = bits.map(b => '<span>' + esc(b) + '</span>').join('');
+    if (miss) statsHtml += '<span class="warn">⚠ ' + miss + ' media missing</span>';
+    card.appendChild(el('div', 'card-stats', statsHtml));
+    return card;
+  }
+
+  // ── thread view ────────────────────────────────────────────────────────────
+  function renderThread(code) {
+    const t = THREADS.find(x => x.code === code);
+    app.innerHTML = '';
+    const body = el('div', 'container');
+    body.style.paddingTop = '24px';
+    app.appendChild(body);
+
+    const back = el('a', 'back-btn', '← All saves');
+    back.href = '#/';
+    body.appendChild(back);
+
+    if (!t) { body.appendChild(el('div', 'empty-note', 'Thread "' + esc(code) + '" not found in this archive.')); return; }
+    document.title = '@' + t.username + ' — Threads Archive';
+
+    const header = el('div', 'thread-header');
+    const profile = 'https://www.threads.com/@' + encodeURIComponent(t.username);
+    const postUrl = profile + '/post/' + encodeURIComponent(t.code);
+
+    const authorRow = el('div', 'author-row');
+    authorRow.appendChild(avatarEl(mediaFile(t.profilePicId), t.displayName || t.username, 'avatar'));
+    authorRow.appendChild(el('div', 'author-info',
+      '<div class="name"><a class="plain-link" href="' + esc(profile) + '" target="_blank" rel="noopener">' + esc(t.displayName || t.username) + '</a></div>' +
+      '<div class="handle"><a class="plain-link" href="' + esc(profile) + '" target="_blank" rel="noopener">@' + esc(t.username) + '</a></div>'));
+    header.appendChild(authorRow);
+    header.appendChild(el('div', 'post-date',
+      '<a class="plain-link" href="' + esc(postUrl) + '" target="_blank" rel="noopener">' + esc(formatDate((t.takenAt ?? 0) * 1000)) + ' ↗</a>'));
+
+    const items = t.threadItems?.length ? t.threadItems : [{ text: t.text, images: [], videos: [] }];
+    const multi = items.length > 1;
+    for (const item of items) {
+      const target = multi ? el('div', 'thread-part') : header;
+      if (multi) {
+        const pa = el('div', 'thread-part-avatar');
+        const foreign = item.username && item.username !== t.username;
+        const af = mediaFile(item.avatarId) ?? (foreign ? null : mediaFile(t.profilePicId));
+        if (af) { const img = el('img'); img.src = af; pa.appendChild(img); }
+        else pa.textContent = ((item.username || t.username || '?')[0]).toUpperCase();
+        target.appendChild(pa);
+        if (foreign) {
+          const ipost = item.code ? 'https://www.threads.com/@' + encodeURIComponent(item.username) + '/post/' + encodeURIComponent(item.code) : null;
+          target.appendChild(el('div', 'part-author',
+            '<a class="plain-link p-name" href="https://www.threads.com/@' + encodeURIComponent(item.username) + '" target="_blank" rel="noopener">' + esc(item.displayName || item.username) + '</a>' +
+            (ipost ? '<a class="plain-link p-handle" href="' + esc(ipost) + '" target="_blank" rel="noopener">@' + esc(item.username) + ' ↗</a>'
+                   : '<span class="p-handle">@' + esc(item.username) + '</span>')));
+        }
+      }
+      if (item.text) target.appendChild(el('div', 'post-text', linkify(item.text)));
+      const media = buildMediaGrid(item);
+      if (media) target.appendChild(media);
+      if (multi) header.appendChild(target);
+    }
+
+    const likeN = Number(t.likeCount) || 0, replyN = Number(t.replyCount) || 0;
+    header.appendChild(el('div', 'post-stats',
+      '<span>♥ ' + likeN + '</span>' +
+      '<span>💬 ' + replyN + ' ' + (replyN === 1 ? 'reply' : 'replies') + '</span>'));
+
+    const miss = missingCount(t);
+    if (miss) header.appendChild(el('div', 'media-repair-banner', '⚠ ' + miss + ' media item(s) were not captured before the source expired.'));
+    body.appendChild(header);
+
+    if (t.replies?.length) {
+      const label = el('div', 'section-label');
+      label.appendChild(el('span', null, 'Replies (' + t.replies.length + ')'));
+      const colAll = el('button', 'collapse-all', 'Collapse all');
+      label.appendChild(colAll);
+      body.appendChild(label);
+
+      const cards = [];
+      for (const r of t.replies) {
+        const c = buildReplyCard(r);
+        cards.push(c);
+        body.appendChild(c);
+      }
+      colAll.addEventListener('click', () => {
+        const anyOpen = cards.some(c => !c.classList.contains('collapsed'));
+        cards.forEach(c => setCollapsed(c, anyOpen));
+        colAll.textContent = anyOpen ? 'Expand all' : 'Collapse all';
+      });
+    } else {
+      body.appendChild(el('div', 'no-replies', (t.replyCount ?? 0) > 0 ? t.replyCount + ' replies exist but were not archived.' : 'No replies.'));
+    }
+    window.scrollTo(0, 0);
+  }
+
+  function buildMediaGrid(item) {
+    const refs = [...(item.images ?? []), ...(item.videos ?? [])];
+    if (!refs.length) return null;
+    const grid = el('div', 'media-grid count-' + Math.min(refs.length, 4));
+    for (const ref of refs) {
+      const cell = el('div', 'media-item');
+      const file = mediaFile(ref.archivedId);
+      const isVideo = ref.durationMs !== undefined || MEDIA[ref.archivedId]?.role === 'video' || ref.posterId;
+      if (file && isVideo) {
+        const v = el('video');
+        v.src = file; v.controls = true; v.preload = 'metadata';
+        const poster = mediaFile(ref.posterId);
+        if (poster) v.poster = poster;
+        cell.appendChild(v);
+      } else if (file) {
+        const img = el('img'); img.src = file; img.loading = 'lazy';
+        cell.appendChild(img);
+      } else {
+        cell.classList.add('media-expired');
+        cell.appendChild(el('div', 'media-expired-inner', '⚠<br>Not captured'));
+      }
+      grid.appendChild(cell);
+    }
+    return grid;
+  }
+
+  function buildReplyCard(r) {
+    const card = el('div', 'reply-card');
+    const row = el('div', 'reply-author');
+    const av = el('div', 'reply-avatar');
+    const af = mediaFile(r.avatarId);
+    if (af) { const img = el('img'); img.src = af; av.appendChild(img); }
+    else av.textContent = (r.username || '?')[0].toUpperCase();
+    row.appendChild(av);
+
+    const profile = 'https://www.threads.com/@' + encodeURIComponent(r.username);
+    const rUrl = r.code ? profile + '/post/' + encodeURIComponent(r.code) : profile;
+    row.appendChild(el('div', null,
+      '<div class="reply-name"><a class="plain-link" href="' + esc(profile) + '" target="_blank" rel="noopener">' + esc(r.username) + '</a></div>' +
+      '<div class="reply-handle">@' + esc(r.username) + '</div>'));
+    row.appendChild(el('span', 'reply-date',
+      r.takenAt ? '<a class="plain-link" href="' + esc(rUrl) + '" target="_blank" rel="noopener">' + esc(relativeTime(r.takenAt * 1000)) + ' ↗</a>' : ''));
+
+    const toggle = el('button', 'reply-toggle', '▾');
+    toggle.title = 'Collapse reply';
+    toggle.addEventListener('click', () => setCollapsed(card, !card.classList.contains('collapsed')));
+    row.appendChild(toggle);
+    card.appendChild(row);
+
+    if (r.text) card.appendChild(el('div', 'reply-text', linkify(r.text)));
+    const media = buildMediaGrid(r);
+    if (media) card.appendChild(media);
+
+    const bits = ['♥ ' + (r.likeCount ?? 0)];
+    if ((r.replyCount ?? 0) > 0) bits.push('💬 ' + r.replyCount + ' ' + (r.replyCount === 1 ? 'reply' : 'replies'));
+    card.appendChild(el('div', 'reply-stats', esc(bits.join('   '))));
+    return card;
+  }
+
+  function setCollapsed(card, collapsed) {
+    card.classList.toggle('collapsed', collapsed);
+    const t = card.querySelector('.reply-toggle');
+    if (t) { t.textContent = collapsed ? '▸' : '▾'; t.title = collapsed ? 'Expand reply' : 'Collapse reply'; }
+  }
+  </script>
+</body>
+</html>

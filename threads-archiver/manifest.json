@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Threads Archiver",
+  "version": "0.1.0",
+  "description": "Archive your Threads saved posts with full media and read them locally, even after deletion.",
+
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms",
+    "unlimitedStorage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.threads.com/*",
+    "https://*.cdninstagram.com/*",
+    "https://*.fbcdn.net/*"
+  ],
+
+  "background": {
+    "service_worker": "background/worker.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://*.threads.com/*"],
+      "js": ["content/bridge.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
