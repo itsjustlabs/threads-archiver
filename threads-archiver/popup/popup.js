@@ -262,7 +262,7 @@ async function buildThreadItem(thread) {
 
   const parts = [`♥ ${thread.likeCount ?? 0}`];
   if ((thread.replyCount ?? 0) > 0) parts.push(`💬 ${thread.replyCount}`);
-  if ((thread.replies?.length ?? 0) > 0) parts.push(`${thread.replies.length} reply${thread.replies.length > 1 ? 's' : ''} archived`);
+  if ((thread.replies?.length ?? 0) > 0) parts.push(`${thread.replies.length} ${thread.replies.length === 1 ? 'reply' : 'replies'} archived`);
   if (thread.sourceParent) parts.push('↳ from a reply');
   stats.textContent = parts.join('  ');
 

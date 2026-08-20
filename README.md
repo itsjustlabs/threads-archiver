@@ -4,6 +4,14 @@ A Chrome extension (Manifest V3) that automatically archives your **Threads save
 
 Everything stays on your machine: posts and media live in the extension's IndexedDB. No external services, no telemetry, no accounts.
 
+| Archive timeline | Thread reader |
+|---|---|
+| ![Archive timeline](docs/screenshots/timeline.png) | ![Thread reader](docs/screenshots/reader.png) |
+
+<p align="center"><img src="docs/screenshots/popup.png" width="380" alt="Extension popup"></p>
+
+*Screenshots show demo data.*
+
 ## Features
 
 - **Auto-sync** — checks your saved posts every 30 minutes and archives new ones (text, media bytes, reply chains, author icons)
@@ -62,4 +70,4 @@ Unofficial personal-archival tool, not affiliated with or endorsed by Meta. It a
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © It's Just Labs
