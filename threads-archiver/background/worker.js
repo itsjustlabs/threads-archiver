@@ -196,9 +196,14 @@ async function runSync() {
     console.log(`[archiver] ${newNodes.length} new posts to archive`);
 
     // ── 3. Archive new posts ────────────────────────────────────────────────
+    // newNodes is a snapshot from step 2. Re-check existence just before
+    // archiving each one so anything added since (a concurrent import, or a
+    // resume after an import) is deduped rather than re-fetched/overwritten.
     for (let i = 0; i < newNodes.length; i++) {
       throwIfPaused(); // finish the previous post, then stop here if paused
       const node = newNodes[i];
+      const code = (node?.thread_items?.[0]?.post ?? node)?.code;
+      if (code && await getThread(code)) continue; // imported/archived meanwhile
       await setSyncStatus('syncing', {
         message: `Archiving post ${i + 1} of ${newNodes.length}…`,
       });
