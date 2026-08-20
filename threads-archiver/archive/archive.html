@@ -201,6 +201,54 @@
       padding: 60px 20px;
       line-height: 1.7;
     }
+
+    /* ── settings gear + modal ── */
+    .gear-btn {
+      margin-left: auto;
+      background: none; border: none; color: var(--muted);
+      font-size: 18px; cursor: pointer; line-height: 1; padding: 2px 4px;
+    }
+    .gear-btn:hover { color: var(--text); }
+
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 50;
+      background: rgba(0, 0, 0, .6);
+      display: flex; align-items: flex-start; justify-content: center;
+      padding: 60px 16px;
+      overflow-y: auto;
+    }
+    .modal {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 100%; max-width: 460px;
+      padding: 20px;
+    }
+    .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+    .modal-head h2 { font-size: 16px; font-weight: 700; }
+    .modal-close { background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+    .modal-close:hover { color: var(--text); }
+
+    .setting { padding: 14px 0; border-top: 1px solid var(--border); }
+    .setting:first-of-type { border-top: none; }
+    .setting-label { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .setting-desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 10px; }
+    .setting-btn {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 13px;
+      padding: 8px 14px; cursor: pointer;
+    }
+    .setting-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .setting-btn:disabled { opacity: .5; cursor: default; }
+
+    .setting-progress { height: 4px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+    .setting-progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+    .setting-status { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
+
+    .setting-version {
+      padding-top: 14px; border-top: 1px solid var(--border);
+      font-size: 11px; color: var(--muted); text-align: center; user-select: text;
+    }
   </style>
 </head>
 <body>
@@ -209,6 +257,7 @@
       <div class="title-row">
         <h1>Threads Archive</h1>
         <span class="count" id="countLabel"></span>
+        <button class="gear-btn" id="settingsBtn" title="Backup &amp; settings" aria-label="Settings">⚙</button>
       </div>
       <div class="toolbar">
         <input class="search-input" id="searchInput" type="search"
@@ -222,6 +271,33 @@
         <button class="filter-btn" id="missingFilter"
                 title="Show only threads with missing media">⚠</button>
       </div>
+    </div>
+  </div>
+
+  <!-- settings / backup modal -->
+  <div class="modal-backdrop" id="settingsModal" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Backup &amp; settings</h2>
+        <button class="modal-close" id="settingsClose" aria-label="Close">✕</button>
+      </div>
+
+      <div class="setting">
+        <div class="setting-label">Export archive</div>
+        <div class="setting-desc">Download a self-contained .zip — media files, a standalone offline viewer, and the local API. Shareable and viewable anywhere.</div>
+        <button class="setting-btn" id="exportBtn">⤓ Export .zip</button>
+      </div>
+
+      <div class="setting">
+        <div class="setting-label">Import archive</div>
+        <div class="setting-desc">Restore an exported .zip (or a legacy .json). Non-destructive: adds new threads, updates only newer ones, never deletes. Runs in the background — safe to keep browsing.</div>
+        <button class="setting-btn" id="importBtn">⤒ Choose file to import…</button>
+        <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" style="display:none">
+        <div class="setting-progress" id="importProgress" style="display:none"><div class="setting-progress-fill" id="importProgressFill"></div></div>
+        <div class="setting-status" id="backupStatus"></div>
+      </div>
+
+      <div class="setting-version" id="settingsVersion"></div>
     </div>
   </div>
 

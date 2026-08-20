@@ -267,6 +267,15 @@
     .footer-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
     .footer-btn:disabled { opacity: .5; cursor: default; }
 
+    .version-line {
+      text-align: center;
+      font-size: 10px;
+      color: var(--muted);
+      padding: 0 0 8px;
+      opacity: .7;
+      user-select: text;
+    }
+
     /* ── auth banner ── */
     .auth-banner {
       margin: 12px 16px;
@@ -320,12 +329,10 @@
   <div class="thread-list" id="threadList"></div>
 
   <div class="footer">
-    <button class="footer-btn" id="exportBtn"
-            title="Download a self-contained .zip: media files, a standalone viewer (index.html), and the local API — shareable and viewable anywhere">⤓ Export .zip</button>
-    <button class="footer-btn" id="importBtn"
-            title="Restore an exported .zip (or legacy .json) into this browser">⤒ Import</button>
-    <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" style="display:none">
+    <button class="footer-btn" id="openSettingsBtn"
+            title="Backup, restore, and settings — opens the full-tab archive">⚙ Backup &amp; settings</button>
   </div>
+  <div class="version-line" id="versionLine"></div>
 
   <script src="popup.js" type="module"></script>
 </body>

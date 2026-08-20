@@ -3,7 +3,8 @@
  * Connects to background/worker.js via chrome.runtime.sendMessage.
  */
 
-import { getAllThreads, getMedia, getAllMediaIds, forEachMedia } from '../shared/db.js';
+import { getAllThreads, getMedia, getAllMediaIds } from '../shared/db.js';
+import { BUILD } from '../shared/version.js';
 
 const syncBtn     = document.getElementById('syncBtn');
 const fullRefreshBtn = document.getElementById('fullRefreshBtn');
@@ -340,207 +341,19 @@ function openReader(code) {
   chrome.tabs.create({ url });
 }
 
-// ── export / import ────────────────────────────────────────────────────────────
-// Export: a self-contained ZIP (STORE, no compression — media is already
-// compressed) that anyone can extract and view locally:
-//   archive.json    manifest v2 — threads + media metadata, media as file paths
-//   data.js         same manifest as window.ARCHIVE_DATA (file:// viewers can't fetch)
-//   index.html      standalone viewer (timeline + thread pages)
-//   media/…         raw media files with real extensions
-//   api/server.js   local REST API + Swagger (see api/README.md)
-// Import: accepts these ZIPs, or legacy v1 .json exports (base64 media).
+// ── backup & settings ──────────────────────────────────────────────────────────
+// Export/import (which needs a file picker) live on the full-tab archive page:
+// the popup closes when the OS file dialog opens, which would cancel an import.
 
-const EXPORT_FORMAT = 'threads-archiver-export';
-
-const exportBtn  = document.getElementById('exportBtn');
-const importBtn  = document.getElementById('importBtn');
-const importFile = document.getElementById('importFile');
-
-const MIME_EXT = {
-  'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif',
-  'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm',
-};
-const extFor = mime => MIME_EXT[mime] ?? 'bin';
-
-async function fetchPackaged(pathInExt) {
-  const res = await fetch(chrome.runtime.getURL(pathInExt));
-  if (!res.ok) throw new Error(`Missing packaged file: ${pathInExt}`);
-  return res.text();
-}
-
-exportBtn.addEventListener('click', async () => {
-  exportBtn.disabled = true;
-  try {
-    holdStatus('Exporting…', 60000);
-
-    const threads   = await getAllThreads();
-    const enc       = new TextEncoder();
-    const mediaMeta = [];
-    const files     = [];
-
-    let n = 0;
-    await forEachMedia(m => {
-      const file = `media/${m.id}.${extFor(m.mimeType)}`;
-      mediaMeta.push({ ...m, data: undefined, file });
-      files.push({ name: file, data: new Uint8Array(m.data ?? new ArrayBuffer(0)) });
-      if (++n % 25 === 0) statusText.textContent = `Exporting… ${n} media files`;
-    });
-
-    const manifest = JSON.stringify({
-      format: EXPORT_FORMAT, version: 2, exportedAt: Date.now(),
-      threads, media: mediaMeta,
-    });
-
-    statusText.textContent = 'Building zip…';
-    const [viewerHtml, apiJs, apiReadme] = await Promise.all([
-      fetchPackaged('export/viewer.html'),
-      fetchPackaged('api/server.js'),
-      fetchPackaged('api/README.md'),
-    ]);
-    const readme = [
-      '# Threads Archive (exported)', '',
-      `Exported ${new Date().toISOString()} — ${threads.length} threads, ${n} media files.`, '',
-      '- **View**: open `index.html` in a browser.',
-      '- **Crawl via API**: `node api/server.js .` then open http://localhost:8787/docs',
-      '- `archive.json` is the machine-readable manifest; media paths are relative.', '',
-    ].join('\n');
-
-    files.unshift(
-      { name: 'index.html',    data: enc.encode(viewerHtml) },
-      { name: 'data.js',       data: enc.encode(`window.ARCHIVE_DATA = ${manifest};`) },
-      { name: 'archive.json',  data: enc.encode(manifest) },
-      { name: 'README.md',     data: enc.encode(readme) },
-      { name: 'api/server.js', data: enc.encode(apiJs) },
-      { name: 'api/README.md', data: enc.encode(apiReadme) },
-    );
-
-    const blob = makeZip(files);
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = `threads-archive-${new Date().toISOString().slice(0, 10)}.zip`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-
-    holdStatus(`Exported ${threads.length} threads, ${n} media files`);
-  } catch (e) {
-    holdStatus(`Export failed: ${e.message}`);
-  } finally {
-    exportBtn.disabled = false;
-  }
+document.getElementById('openSettingsBtn').addEventListener('click', () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL('archive/archive.html#settings') });
 });
 
-importBtn.addEventListener('click', () => importFile.click());
-
-importFile.addEventListener('change', async () => {
-  const file = importFile.files?.[0];
-  importFile.value = ''; // allow re-selecting the same file
-  if (!file) return;
-
-  importBtn.disabled = true;
-  // Poll the worker's status for the live progress bar. The import runs in the
-  // service worker, so it keeps going even if this popup is closed — reopening
-  // reconnects to the same progress.
-  const poll = setInterval(async () => applyStatus(await getStatus()), 500);
-  try {
-    statusText.textContent = 'Reading file…';
-    // Hand the file to the worker via the Cache API — runtime messages are
-    // JSON-serialized and can't carry the raw bytes.
-    const cache = await caches.open('ta-import');
-    await cache.put('https://threads-archiver.local/import-payload', new Response(file));
-    const res = await new Promise(resolve => {
-      chrome.runtime.sendMessage({ type: 'IMPORT_ARCHIVE' }, r =>
-        resolve(r ?? { ok: false, error: chrome.runtime.lastError?.message ?? 'No response from background worker.' }));
-    });
-    clearInterval(poll);
-    if (res.ok) { holdStatus(res.summary); await renderThreads(); }
-    else holdStatus(`Import failed: ${res.error}`);
-  } catch (e) {
-    clearInterval(poll);
-    holdStatus(`Import failed: ${e.message}`);
-  } finally {
-    importBtn.disabled = false;
-  }
-});
-
-// ── minimal ZIP writer (STORE method only, no dependencies) — used by export ───
-
-const CRC_TABLE = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    t[n] = c >>> 0;
-  }
-  return t;
-})();
-
-function crc32(bytes) {
-  let c = 0xffffffff;
-  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-/** files: [{ name: string, data: Uint8Array }] → Blob (application/zip) */
-function makeZip(files) {
-  const enc = new TextEncoder();
-  const now = new Date();
-  const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xffff;
-  const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
-
-  const parts = [], central = [];
-  let offset = 0;
-
-  for (const f of files) {
-    const name = enc.encode(f.name);
-    const crc  = crc32(f.data);
-    const lh   = new DataView(new ArrayBuffer(30));
-    lh.setUint32(0, 0x04034b50, true);            // local file header sig
-    lh.setUint16(4, 20, true);                    // version needed
-    lh.setUint16(6, 0x0800, true);                // flags: UTF-8 names
-    lh.setUint16(8, 0, true);                     // method: STORE
-    lh.setUint16(10, dosTime, true);
-    lh.setUint16(12, dosDate, true);
-    lh.setUint32(14, crc, true);
-    lh.setUint32(18, f.data.length, true);        // compressed size
-    lh.setUint32(22, f.data.length, true);        // uncompressed size
-    lh.setUint16(26, name.length, true);
-    lh.setUint16(28, 0, true);                    // extra len
-    parts.push(lh.buffer, name, f.data);
-    central.push({ name, crc, size: f.data.length, offset });
-    offset += 30 + name.length + f.data.length;
-  }
-
-  let cdSize = 0;
-  for (const e of central) {
-    const cd = new DataView(new ArrayBuffer(46));
-    cd.setUint32(0, 0x02014b50, true);            // central dir sig
-    cd.setUint16(4, 20, true);                    // version made by
-    cd.setUint16(6, 20, true);                    // version needed
-    cd.setUint16(8, 0x0800, true);                // flags
-    cd.setUint16(10, 0, true);                    // method
-    cd.setUint16(12, dosTime, true);
-    cd.setUint16(14, dosDate, true);
-    cd.setUint32(16, e.crc, true);
-    cd.setUint32(20, e.size, true);
-    cd.setUint32(24, e.size, true);
-    cd.setUint16(28, e.name.length, true);
-    cd.setUint32(42, e.offset, true);             // local header offset
-    parts.push(cd.buffer, e.name);
-    cdSize += 46 + e.name.length;
-  }
-
-  const eocd = new DataView(new ArrayBuffer(22));
-  eocd.setUint32(0, 0x06054b50, true);            // end of central dir sig
-  eocd.setUint16(8, central.length, true);
-  eocd.setUint16(10, central.length, true);
-  eocd.setUint32(12, cdSize, true);
-  eocd.setUint32(16, offset, true);
-  parts.push(eocd.buffer);
-
-  return new Blob(parts, { type: 'application/zip' });
-}
-// (ZIP reading lives in the worker — import runs there so it survives popup close.)
+// Build/version line
+try {
+  const versionEl = document.getElementById('versionLine');
+  if (versionEl) versionEl.textContent = `v${BUILD.version} · ${BUILD.commit}`;
+} catch { /* no-op */ }
 
 // ── utilities ──────────────────────────────────────────────────────────────────
 

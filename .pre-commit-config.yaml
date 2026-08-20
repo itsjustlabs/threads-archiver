@@ -17,6 +17,14 @@ repos:
 
   - repo: local
     hooks:
+      - id: stamp-version
+        name: Stamp version.js from git + manifest
+        # stamp, then re-stage so the generated file lands in this commit
+        entry: bash -c 'node scripts/stamp-version.mjs && git add threads-archiver/shared/version.js'
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: js-syntax
         name: JS syntax check (ES modules, node --check)
         entry: bash -c 'for f in "$@"; do node --input-type=module --check < "$f" || { echo "Syntax error in $f"; exit 1; }; done' --

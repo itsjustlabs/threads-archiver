@@ -7,6 +7,8 @@
  */
 
 import { getAllThreads, getMediaForPost, getAllMediaIds } from '../shared/db.js';
+import { BUILD } from '../shared/version.js';
+import { buildExportZip, startImport } from '../shared/backup.js';
 
 const timelineEl  = document.getElementById('timeline');
 const countLabel  = document.getElementById('countLabel');
@@ -29,6 +31,89 @@ const _observer = new IntersectionObserver(entries => {
 }, { rootMargin: '400px' });
 
 await render();
+setupSettings();
+
+// ── settings / backup modal ────────────────────────────────────────────────────
+
+function setupSettings() {
+  const modal      = document.getElementById('settingsModal');
+  const openBtn    = document.getElementById('settingsBtn');
+  const closeBtn   = document.getElementById('settingsClose');
+  const exportBtn  = document.getElementById('exportBtn');
+  const importBtn  = document.getElementById('importBtn');
+  const importFile = document.getElementById('importFile');
+  const progress   = document.getElementById('importProgress');
+  const progFill   = document.getElementById('importProgressFill');
+  const statusEl   = document.getElementById('backupStatus');
+
+  document.getElementById('settingsVersion').textContent = `Threads Archiver v${BUILD.version} · ${BUILD.commit} · ${BUILD.date}`;
+
+  const open  = () => { modal.style.display = 'flex'; };
+  const close = () => { modal.style.display = 'none'; };
+  openBtn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+  if (location.hash === '#settings') open(); // popup deep-links here
+
+  // Export
+  exportBtn.addEventListener('click', async () => {
+    exportBtn.disabled = true;
+    statusEl.textContent = 'Exporting…';
+    try {
+      const { blob, filename, threadCount, mediaCount } = await buildExportZip(msg => { statusEl.textContent = msg; });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      statusEl.textContent = `Exported ${threadCount} threads, ${mediaCount} media files`;
+    } catch (e) {
+      statusEl.textContent = `Export failed: ${e.message}`;
+    } finally {
+      exportBtn.disabled = false;
+    }
+  });
+
+  // Import — file input in a tab is reliable (unlike the popup)
+  importBtn.addEventListener('click', () => importFile.click());
+  importFile.addEventListener('change', async () => {
+    const file = importFile.files?.[0];
+    importFile.value = '';
+    if (!file) return;
+
+    importBtn.disabled = true;
+    progress.style.display = 'block';
+    statusEl.textContent = 'Reading file…';
+
+    // Poll the worker for import progress (import runs in the background worker)
+    const poll = setInterval(async () => {
+      const s = await getStatus();
+      if (s.state === 'importing') {
+        progFill.style.width = `${Math.round((s.progress ?? 0) * 100)}%`;
+        statusEl.textContent = s.message ?? 'Importing…';
+      }
+    }, 400);
+
+    try {
+      const res = await startImport(file);
+      clearInterval(poll);
+      progFill.style.width = '100%';
+      if (res.ok) { statusEl.textContent = res.summary; await render(); }
+      else statusEl.textContent = `Import failed: ${res.error}`;
+    } catch (e) {
+      clearInterval(poll);
+      statusEl.textContent = `Import failed: ${e.message}`;
+    } finally {
+      importBtn.disabled = false;
+      setTimeout(() => { progress.style.display = 'none'; progFill.style.width = '0'; }, 1500);
+    }
+  });
+}
+
+function getStatus() {
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage({ type: 'GET_STATUS' }, s => resolve(s ?? { state: 'idle' }));
+  });
+}
 
 // ── controls ───────────────────────────────────────────────────────────────────
 
