@@ -57,7 +57,7 @@ Unofficial personal-archival tool, not affiliated with or endorsed by Meta. It a
 ## Development
 
 - `CLAUDE.md` — architecture notes, GraphQL query snapshots, data model, debugging playbook (also serves as agent context for AI-assisted development)
-- Pre-commit hooks: `git config core.hooksPath .githooks` (syntax checks, JSON validation, secret/large-file guards)
+- Hooks via [pre-commit](https://pre-commit.com): `pip install pre-commit && pre-commit install` — JS syntax, JSON validation, secret/private-key/session-token detection, large-file and export-file guards (see `.pre-commit-config.yaml`)
 - No build step, no dependencies — vanilla JS everywhere, including the ZIP writer and the API server
 
 ## License
