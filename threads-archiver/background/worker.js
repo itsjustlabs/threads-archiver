@@ -18,7 +18,7 @@ import {
 
 import {
   getThread, putThread, getAllThreads,
-  putMedia, getMedia, getMediaForPost, getStorageStats,
+  putMedia, getMedia, getMediaForPost, getStorageStats, getAllMediaIds,
 } from '../shared/db.js';
 
 // ── constants ──────────────────────────────────────────────────────────────────
@@ -93,6 +93,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse({ ok: true });
     })();
     return true;
+  }
+  if (msg.type === 'IMPORT_ARCHIVE') {
+    // The zip bytes are handed off via the Cache API (runtime messages are
+    // JSON-serialized and can't carry an ArrayBuffer).
+    runImport()
+      .then(res => sendResponse(res))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true; // keep channel open
   }
   if (msg.type === 'ARCHIVE_REPLY') {
     archiveReply(msg)
@@ -451,6 +459,147 @@ async function runFullRefresh(resumeCodes = null) {
     _pauseRequested = false;
     _syncing = false;
   }
+}
+
+// ── import (runs in the worker so it survives popup close) ──────────────────────
+
+/**
+ * Import an exported archive (ZIP or legacy JSON) given its raw bytes.
+ * Non-destructive merge: add new threads, update an existing one only if the
+ * imported copy is newer, never regress local data; media is add-only by id.
+ * Progress is reported via the shared status ('importing' + progress 0..1) so
+ * the popup shows it and can reconnect after being closed. Returns a summary.
+ */
+const IMPORT_CACHE = 'ta-import';
+// Cache API keys must be http(s) URLs (chrome-extension:// is rejected). This
+// is just an identifier — nothing is ever fetched from it.
+const IMPORT_KEY   = 'https://threads-archiver.local/import-payload';
+
+async function runImport() {
+  if (_syncing) throw new Error('A sync or refresh is running — pause or wait, then import.');
+  _syncing = true;
+  const before = await getSyncStatus();
+  try {
+    await setSyncStatus('importing', { message: 'Reading file…', progress: 0 });
+
+    // Bytes were stashed in the Cache API by the popup.
+    const cache = await caches.open(IMPORT_CACHE);
+    const resp  = await cache.match(IMPORT_KEY);
+    if (!resp) throw new Error('Import payload not found — please pick the file again.');
+    const bytes = new Uint8Array(await resp.arrayBuffer());
+    const isZip = bytes[0] === 0x50 && bytes[1] === 0x4b; // 'PK'
+
+    let data, mediaBytesFor;
+    if (isZip) {
+      const entries  = await parseZip(bytes);
+      const manifest = [...entries.keys()].find(k => k.endsWith('archive.json') && !k.startsWith('__MACOSX/'));
+      if (!manifest) throw new Error('archive.json not found in zip.');
+      const prefix = manifest.slice(0, -'archive.json'.length);
+      data = JSON.parse(new TextDecoder().decode(entries.get(manifest)));
+      mediaBytesFor = m => { const e = entries.get(prefix + m.file); return e ? e.slice().buffer : null; };
+    } else {
+      data = JSON.parse(new TextDecoder().decode(bytes));
+      mediaBytesFor = m => (typeof m.data === 'string' ? b64ToBuf(m.data) : null);
+    }
+
+    if (data.format !== 'threads-archiver-export' || !Array.isArray(data.threads) || !Array.isArray(data.media)) {
+      throw new Error('Not a Threads Archiver export.');
+    }
+
+    const activity = x => x?.lastActivityAt ?? x?.takenAt ?? 0;
+    const totalThreads = data.threads.length, totalMedia = data.media.length;
+    const totalWork = totalThreads + totalMedia || 1;
+    let added = 0, updated = 0, unchanged = 0;
+
+    for (let i = 0; i < data.threads.length; i++) {
+      const thread = data.threads[i];
+      if (!thread?.code) continue;
+      const existing = await getThread(thread.code).catch(() => null);
+      if (!existing) { await putThread(thread); added++; }
+      else if (activity(thread) > activity(existing)) { await putThread(thread); updated++; }
+      else unchanged++;
+      if (i % 10 === 0) await setSyncStatus('importing', { message: `Importing threads… ${i + 1}/${totalThreads}`, progress: (i + 1) / totalWork });
+    }
+
+    const haveMedia = new Set(await getAllMediaIds().catch(() => []));
+    let m = 0;
+    for (let i = 0; i < data.media.length; i++) {
+      const media = data.media[i];
+      if (!media?.id || haveMedia.has(media.id)) continue;
+      const b = mediaBytesFor(media);
+      if (!b) continue;
+      await putMedia({ ...media, file: undefined, data: b });
+      m++;
+      if (i % 15 === 0) await setSyncStatus('importing', { message: `Importing media… ${m}`, progress: (totalThreads + i + 1) / totalWork });
+    }
+
+    const parts = [];
+    if (added)     parts.push(`${added} new`);
+    if (updated)   parts.push(`${updated} updated`);
+    if (unchanged) parts.push(`${unchanged} already present`);
+    const summary = `Imported: ${parts.join(', ') || 'nothing new'} · ${m} media file${m === 1 ? '' : 's'} added`;
+
+    const stats = await getStorageStats().catch(() => ({}));
+    await setSyncStatus('idle', { lastSync: before.lastSync, threadCount: stats.threadCount, mediaBytes: stats.mediaBytes });
+    console.log(`[archiver] ${summary}`);
+    return { ok: true, summary, added, updated, unchanged, media: m };
+  } catch (e) {
+    await setSyncStatus('error', { message: `Import failed: ${e.message}` });
+    throw e;
+  } finally {
+    _syncing = false;
+    caches.open(IMPORT_CACHE).then(c => c.delete(IMPORT_KEY)).catch(() => {}); // free the payload
+  }
+}
+
+// ── ZIP reader (STORE + DEFLATE), used by import ───────────────────────────────
+
+function b64ToBuf(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out.buffer;
+}
+
+async function inflateRaw(bytes) {
+  const ds = new DecompressionStream('deflate-raw');
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** Parse a ZIP → Map<name, Uint8Array>. STORE + DEFLATE; skips dirs + __MACOSX. */
+async function parseZip(bytes) {
+  const u16 = i => bytes[i] | (bytes[i + 1] << 8);
+  const u32 = i => (bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0;
+
+  let e = bytes.length - 22;
+  while (e >= 0 && u32(e) !== 0x06054b50) e--;
+  if (e < 0) throw new Error('Not a valid zip file.');
+
+  const count = u16(e + 10);
+  let p = u32(e + 16);
+  const dec = new TextDecoder();
+  const entries = new Map();
+
+  for (let i = 0; i < count; i++) {
+    if (u32(p) !== 0x02014b50) throw new Error('Corrupt zip (bad central directory).');
+    const method     = u16(p + 10);
+    const csize      = u32(p + 20);
+    const nameLen    = u16(p + 28);
+    const extraLen   = u16(p + 30);
+    const commentLen = u16(p + 32);
+    const lho        = u32(p + 42);
+    const name       = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/') || name.startsWith('__MACOSX/')) continue;
+    const dataStart = lho + 30 + u16(lho + 26) + u16(lho + 28);
+    const raw = bytes.subarray(dataStart, dataStart + csize);
+    if (method === 0)      entries.set(name, raw);
+    else if (method === 8) entries.set(name, await inflateRaw(raw));
+    else throw new Error(`Zip entry "${name}" uses unsupported compression method ${method}.`);
+  }
+  return entries;
 }
 
 /** Resume an interrupted full refresh, if one is pending. Returns true if resumed. */

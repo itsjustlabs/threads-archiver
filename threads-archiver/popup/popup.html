@@ -125,6 +125,19 @@
 
     .media-warning { color: #e8c96a; }
 
+    /* import progress bar */
+    .progress-bar {
+      height: 3px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0;
+      background: var(--accent);
+      transition: width .3s ease;
+    }
+
     .filter-btn {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -285,6 +298,10 @@
     <div class="status-dot" id="statusDot"></div>
     <span id="statusText">Loading…</span>
     <span class="status-stats" id="statsText"></span>
+  </div>
+
+  <div class="progress-bar" id="progressBar" style="display:none">
+    <div class="progress-fill"></div>
   </div>
 
   <div class="toolbar">
