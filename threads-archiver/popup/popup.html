@@ -82,6 +82,7 @@
     .status-dot.error   { background: var(--danger); }
     .status-dot.auth_error { background: var(--danger); }
     .status-dot.idle    { background: var(--green); }
+    .status-dot.paused  { background: var(--muted); }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
 
     .status-stats {
@@ -275,6 +276,8 @@
             title="Browse all saves in a full-tab timeline">🗂</button>
     <button class="sync-btn secondary" id="fullRefreshBtn"
             title="Re-fetch details for ALL archived posts: user icons, missing media, video posters, reply counts. One request per post — can take a while.">⟳ Full refresh</button>
+    <button class="sync-btn secondary" id="pauseBtn" style="display:none"
+            title="Finish the current item, then pause. Resume anytime.">Pause</button>
     <button class="sync-btn" id="syncBtn">Sync now</button>
   </div>
 

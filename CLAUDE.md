@@ -55,6 +55,17 @@ Meta's `lsd` token (request-signing) and related params are extracted by running
 - `replies[]` entries carry `likeCount` + `replyCount` (that reply's own direct_reply_count) and `avatarId` (author's profile pic, media id `${code}/reply-${replyCode}/avatar/0`; cosmetic, not counted in mediaMissing)
 - `sourceParent` — set when a thread was archived via the reader's per-reply "Archive" action (`ARCHIVE_REPLY` message); the reply becomes a first-class thread keyed by its own code
 
+### Pause / resume (background/worker.js)
+Cooperative: `PAUSE_SYNC` sets `_pauseRequested`; `throwIfPaused()` at the top
+of each per-item loop (archive-new-posts, checkDeltas batches,
+repairMissingMedia threads, full-refresh queue) lets the in-flight item finish
+then throws `SyncPaused`, caught to set status `paused`. The pause flag is
+persisted (`syncPaused` in `chrome.storage.local`) so the alarm and startup
+won't auto-resume; `getSyncStatus` reports `paused` even after a restart (when
+session status is gone). `RESUME_SYNC` clears the flag and re-runs (a
+full-refresh queue resumes first). Work is idempotent, so resume = run again.
+Popup shows a Pause button while `syncing`, Resume while `paused`.
+
 ### Full refresh (background/worker.js `runFullRefresh`)
 Popup "⟳ Full refresh" re-fetches detail for every archived thread (icons,
 media, posters, counts). Resumable: the remaining-codes queue persists in

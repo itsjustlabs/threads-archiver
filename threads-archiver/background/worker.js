@@ -34,8 +34,9 @@ chrome.runtime.onInstalled.addListener(() => {
   setSyncStatus('idle');
 });
 
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
   scheduleAlarm();
+  if (await isPaused()) return; // stay paused across restarts until user resumes
   maybeResumeFullRefresh(); // finish an interrupted full refresh
 });
 
@@ -54,6 +55,7 @@ function scheduleAlarm() {
 
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== ALARM_NAME) return;
+  if (await isPaused()) return; // respect an explicit pause — don't auto-resume
   // An interrupted full refresh takes priority over the regular sync
   if (await maybeResumeFullRefresh()) return;
   runSync();
@@ -63,12 +65,34 @@ chrome.alarms.onAlarm.addListener(async alarm => {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'SYNC_NOW') {
+    setPaused(false); _pauseRequested = false; // manual sync clears any pause
     runSync().then(() => sendResponse({ ok: true })).catch(e => sendResponse({ ok: false, error: e.message }));
     return true; // keep channel open
   }
   if (msg.type === 'FULL_REFRESH') {
+    setPaused(false); _pauseRequested = false;
     runFullRefresh().then(() => sendResponse({ ok: true })).catch(e => sendResponse({ ok: false, error: e.message }));
     return true; // keep channel open
+  }
+  if (msg.type === 'PAUSE_SYNC') {
+    // If a job is running, ask it to stop at the next checkpoint; otherwise
+    // just set the persisted flag so scheduled runs don't start.
+    _pauseRequested = true;
+    (async () => {
+      if (!_syncing) { await setPaused(true); await setSyncStatus('paused', { message: 'Sync paused' }); }
+      sendResponse({ ok: true, running: _syncing });
+    })();
+    return true;
+  }
+  if (msg.type === 'RESUME_SYNC') {
+    _pauseRequested = false;
+    (async () => {
+      await setPaused(false);
+      // Resume whatever was in progress: a full-refresh queue takes priority.
+      if (!(await maybeResumeFullRefresh())) runSync();
+      sendResponse({ ok: true });
+    })();
+    return true;
   }
   if (msg.type === 'ARCHIVE_REPLY') {
     archiveReply(msg)
@@ -100,8 +124,38 @@ async function setSyncStatus(state, extra = {}) {
 
 async function getSyncStatus() {
   const { syncStatus } = await chrome.storage.session.get('syncStatus');
+  // The paused flag is persisted (storage.local); the session status is not,
+  // so after a browser restart reflect the pause the popup would otherwise miss.
+  if (await isPaused() && syncStatus?.state !== 'syncing') {
+    return { ...(syncStatus ?? {}), state: 'paused', message: syncStatus?.message ?? 'Sync paused' };
+  }
   return syncStatus ?? { state: 'idle' };
 }
+
+// ── pause / resume ───────────────────────────────────────────────────────────
+// Cooperative: a pause request lets the in-flight item finish, then the next
+// checkpoint (top of each per-item loop) stops the run cleanly. The paused
+// flag is persisted so the alarm won't silently auto-resume; the work itself
+// is idempotent (archiving skips existing, delta/repair re-scan), so resuming
+// is just running the job again.
+
+const PAUSE_KEY = 'syncPaused';
+let _pauseRequested = false;
+
+class SyncPaused extends Error {
+  constructor() { super('Paused'); this.name = 'SyncPaused'; }
+}
+
+/** Called at safe checkpoints inside sync loops. */
+function throwIfPaused() {
+  if (_pauseRequested) throw new SyncPaused();
+}
+
+async function isPaused() {
+  const { [PAUSE_KEY]: v } = await chrome.storage.local.get(PAUSE_KEY);
+  return v === true;
+}
+const setPaused = v => chrome.storage.local.set({ [PAUSE_KEY]: v });
 
 // ── main sync ──────────────────────────────────────────────────────────────────
 
@@ -143,6 +197,7 @@ async function runSync() {
 
     // ── 3. Archive new posts ────────────────────────────────────────────────
     for (let i = 0; i < newNodes.length; i++) {
+      throwIfPaused(); // finish the previous post, then stop here if paused
       const node = newNodes[i];
       await setSyncStatus('syncing', {
         message: `Archiving post ${i + 1} of ${newNodes.length}…`,
@@ -174,13 +229,22 @@ async function runSync() {
     console.log('[archiver] Sync complete');
 
   } catch (e) {
-    console.error('[archiver] Sync error:', e);
-    if (e instanceof AuthError) {
+    if (e instanceof SyncPaused) {
+      await setPaused(true);
+      const stats = await getStorageStats().catch(() => ({}));
+      await setSyncStatus('paused', {
+        message: 'Sync paused', threadCount: stats.threadCount, mediaBytes: stats.mediaBytes,
+      });
+      console.log('[archiver] Sync paused');
+    } else if (e instanceof AuthError) {
+      console.error('[archiver] Sync error:', e);
       await setSyncStatus('auth_error', { message: e.message });
     } else {
+      console.error('[archiver] Sync error:', e);
       await setSyncStatus('error', { message: e.message });
     }
   } finally {
+    _pauseRequested = false;
     _syncing = false;
   }
 }
@@ -333,6 +397,7 @@ async function runFullRefresh(resumeCodes = null) {
     let refreshed = 0, failed = 0;
 
     while (codes.length) {
+      throwIfPaused(); // finish the current thread, then stop; queue is persisted
       const code = codes[0];
       await setSyncStatus('syncing', {
         message: `Full refresh: ${total - codes.length + 1} of ${total}…`,
@@ -366,9 +431,19 @@ async function runFullRefresh(resumeCodes = null) {
   } catch (e) {
     // Queue stays in storage.local so the run resumes at the next
     // startup/alarm rather than starting over.
-    console.error('[archiver] Full refresh error (queue kept for resume):', e);
-    await setSyncStatus(e instanceof AuthError ? 'auth_error' : 'error', { message: e.message });
+    if (e instanceof SyncPaused) {
+      await setPaused(true);
+      const stats = await getStorageStats().catch(() => ({}));
+      await setSyncStatus('paused', {
+        message: 'Full refresh paused', threadCount: stats.threadCount, mediaBytes: stats.mediaBytes,
+      });
+      console.log('[archiver] Full refresh paused (queue kept)');
+    } else {
+      console.error('[archiver] Full refresh error (queue kept for resume):', e);
+      await setSyncStatus(e instanceof AuthError ? 'auth_error' : 'error', { message: e.message });
+    }
   } finally {
+    _pauseRequested = false;
     _syncing = false;
   }
 }
@@ -755,6 +830,7 @@ async function checkDeltas() {
 
   // Batch into groups to avoid huge requests
   for (let i = 0; i < threads.length; i += DELTA_BATCH_SIZE) {
+    throwIfPaused();
     const batch = threads.slice(i, i + DELTA_BATCH_SIZE);
     const pks   = batch.map(t => t.pk).filter(Boolean);
     if (!pks.length) continue;
@@ -835,6 +911,7 @@ async function repairMissingMedia() {
   const threads = await getAllThreads();
 
   for (const thread of threads) {
+    throwIfPaused();
     let media;
     try { media = await getMediaForPost(thread.code); } catch { continue; }
     const have = new Set(media.map(m => m.id));

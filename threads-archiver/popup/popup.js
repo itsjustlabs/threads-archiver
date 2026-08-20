@@ -6,6 +6,8 @@
 import { getAllThreads, getThread, getMedia, getAllMediaIds, forEachMedia, putThread, putMedia } from '../shared/db.js';
 
 const syncBtn     = document.getElementById('syncBtn');
+const fullRefreshBtn = document.getElementById('fullRefreshBtn');
+const pauseBtn    = document.getElementById('pauseBtn'); // used by applyStatus during init
 const statusDot   = document.getElementById('statusDot');
 const statusText  = document.getElementById('statusText');
 const statsText   = document.getElementById('statsText');
@@ -52,8 +54,6 @@ missingFilterBtn.addEventListener('click', () => {
 
 // ── sync / full-refresh buttons ────────────────────────────────────────────────
 
-const fullRefreshBtn = document.getElementById('fullRefreshBtn');
-
 function runWorkerJob(type) {
   syncBtn.disabled = fullRefreshBtn.disabled = true;
 
@@ -77,6 +77,19 @@ function runWorkerJob(type) {
 
 syncBtn.addEventListener('click', () => runWorkerJob('SYNC_NOW'));
 fullRefreshBtn.addEventListener('click', () => runWorkerJob('FULL_REFRESH'));
+
+// Pause finishes the in-flight item then stops; resume continues the job.
+pauseBtn.addEventListener('click', async () => {
+  const s = await getStatus();
+  if (s.state === 'paused') {
+    holdStatus('Resuming…', 4000);
+    runWorkerJob('RESUME_SYNC');
+  } else if (s.state === 'syncing') {
+    pauseBtn.disabled = true;
+    pauseBtn.textContent = 'Pausing…';
+    chrome.runtime.sendMessage({ type: 'PAUSE_SYNC' }, () => { pauseBtn.disabled = false; });
+  }
+});
 
 document.getElementById('openArchiveBtn').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('archive/archive.html') });
@@ -105,9 +118,20 @@ function holdStatus(msg, ms = 10000) {
 
 function applyStatus(s) {
   statusDot.className = `status-dot ${s.state ?? 'idle'}`;
+
+  // Pause button: "Pause" while syncing, "Resume" while paused, hidden otherwise
+  if (s.state === 'syncing') {
+    pauseBtn.style.display = ''; pauseBtn.textContent = 'Pause'; pauseBtn.disabled = false;
+  } else if (s.state === 'paused') {
+    pauseBtn.style.display = ''; pauseBtn.textContent = 'Resume'; pauseBtn.disabled = false;
+  } else {
+    pauseBtn.style.display = 'none';
+  }
+
   if (Date.now() < _holdStatusUntil) return; // keep a transient message visible
   switch (s.state) {
     case 'syncing':    statusText.textContent = s.message ?? 'Syncing…'; break;
+    case 'paused':     statusText.textContent = '⏸ ' + (s.message ?? 'Paused'); break;
     case 'auth_error': statusText.textContent = '⚠ Not logged in to Threads'; break;
     case 'error':      statusText.textContent = `Error: ${s.message ?? 'unknown'}`; break;
     default:
