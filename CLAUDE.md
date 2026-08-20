@@ -68,10 +68,15 @@ writer + CRC32 in popup.js): `archive.json` (manifest v2 — media entries have
 `window.ARCHIVE_DATA`, because file:// pages can't fetch), `index.html`
 (standalone viewer bundled from export/viewer.html — timeline + thread pages,
 hash routing, works offline), `media/<id>.<ext>` (raw bytes, extension from
-mimeType), and `api/` (server + README). Import accepts these ZIPs (store-only
-parser in popup.js) or legacy v1 .json exports (base64 media); matching keys
-overwritten, others left alone. api/server.js serves either format — point it
-at the extracted folder (archive.json) or a v1 file.
+mimeType), and `api/` (server + README). Import accepts these ZIPs (STORE + DEFLATE
+parser in popup.js — DEFLATE via DecompressionStream, so Finder/OS-recompressed
+zips also work; skips dirs + __MACOSX) or legacy v1 .json exports (base64 media).
+Import is a **non-destructive merge**: a thread is added if new, updated only if
+the imported copy has a later lastActivityAt (never regresses local data), else
+left as "already present"; media is add-only by id (never overwrites stored
+bytes, never deletes). Result is shown via holdStatus() so the periodic status
+poller doesn't clobber it. api/server.js serves either format — point it at the
+extracted folder (archive.json) or a v1 file.
 
 ### Media repair (background/worker.js `repairMissingMedia`)
 Runs as sync step 5. For threads with missing media bytes (failed download or

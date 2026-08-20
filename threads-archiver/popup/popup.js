@@ -3,7 +3,7 @@
  * Connects to background/worker.js via chrome.runtime.sendMessage.
  */
 
-import { getAllThreads, getMedia, getAllMediaIds, forEachMedia, putThread, putMedia } from '../shared/db.js';
+import { getAllThreads, getThread, getMedia, getAllMediaIds, forEachMedia, putThread, putMedia } from '../shared/db.js';
 
 const syncBtn     = document.getElementById('syncBtn');
 const statusDot   = document.getElementById('statusDot');
@@ -19,6 +19,7 @@ const missingFilterBtn = document.getElementById('missingFilter');
 let _query       = '';
 let _sort        = 'newest';
 let _onlyMissing = false;
+let _holdStatusUntil = 0; // suppress the status poller while a transient msg shows
 
 // ── init ───────────────────────────────────────────────────────────────────────
 
@@ -94,8 +95,17 @@ async function refreshStatus() {
   applyStatus(s);
 }
 
+// Export/import results are transient messages the periodic status poller
+// would otherwise immediately overwrite. holdStatus() shows one and suppresses
+// status updates to the text line until it expires.
+function holdStatus(msg, ms = 10000) {
+  statusText.textContent = msg;
+  _holdStatusUntil = Date.now() + ms;
+}
+
 function applyStatus(s) {
   statusDot.className = `status-dot ${s.state ?? 'idle'}`;
+  if (Date.now() < _holdStatusUntil) return; // keep a transient message visible
   switch (s.state) {
     case 'syncing':    statusText.textContent = s.message ?? 'Syncing…'; break;
     case 'auth_error': statusText.textContent = '⚠ Not logged in to Threads'; break;
@@ -324,9 +334,8 @@ async function fetchPackaged(pathInExt) {
 
 exportBtn.addEventListener('click', async () => {
   exportBtn.disabled = true;
-  const prevStatus = statusText.textContent;
   try {
-    statusText.textContent = 'Exporting…';
+    holdStatus('Exporting…', 60000);
 
     const threads   = await getAllThreads();
     const enc       = new TextEncoder();
@@ -377,12 +386,11 @@ exportBtn.addEventListener('click', async () => {
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
 
-    statusText.textContent = `Exported ${threads.length} threads, ${n} media files`;
+    holdStatus(`Exported ${threads.length} threads, ${n} media files`);
   } catch (e) {
-    statusText.textContent = `Export failed: ${e.message}`;
+    holdStatus(`Export failed: ${e.message}`);
   } finally {
     exportBtn.disabled = false;
-    setTimeout(() => { statusText.textContent = prevStatus; }, 6000);
   }
 });
 
@@ -401,8 +409,8 @@ importFile.addEventListener('change', async () => {
 
     let data, mediaBytesFor;
     if (isZip) {
-      const entries  = parseZip(bytes);
-      const manifest = [...entries.keys()].find(k => k.endsWith('archive.json'));
+      const entries  = await parseZip(bytes);
+      const manifest = [...entries.keys()].find(k => k.endsWith('archive.json') && !k.startsWith('__MACOSX/'));
       if (!manifest) throw new Error('archive.json not found in zip.');
       const prefix = manifest.slice(0, -'archive.json'.length);
       data = JSON.parse(new TextDecoder().decode(entries.get(manifest)));
@@ -419,29 +427,41 @@ importFile.addEventListener('change', async () => {
       throw new Error('Not a Threads Archiver export.');
     }
 
-    let t = 0;
+    // Non-destructive merge: add new threads, update an existing one only if
+    // the imported copy is newer (later lastActivityAt), never regress local
+    // data, and never delete anything the import doesn't include.
+    const activity = x => x?.lastActivityAt ?? x?.takenAt ?? 0;
+    let added = 0, updated = 0, unchanged = 0, done = 0;
     for (const thread of data.threads) {
       if (!thread?.code) continue;
-      await putThread(thread);
-      t++;
-      if (t % 20 === 0) statusText.textContent = `Importing threads… ${t}/${data.threads.length}`;
+      const existing = await getThread(thread.code).catch(() => null);
+      if (!existing) { await putThread(thread); added++; }
+      else if (activity(thread) > activity(existing)) { await putThread(thread); updated++; }
+      else unchanged++;
+      if (++done % 20 === 0) statusText.textContent = `Importing threads… ${done}/${data.threads.length}`;
     }
 
+    // Media is content-addressed by id; only fill gaps, never overwrite bytes
+    // we already hold (avoids clobbering good bytes and is much faster).
+    const haveMedia = new Set(await getAllMediaIds().catch(() => []));
     let m = 0;
     for (const media of data.media) {
-      if (!media?.id) continue;
+      if (!media?.id || haveMedia.has(media.id)) continue;
       const buf = mediaBytesFor(media);
       if (!buf) continue;
       await putMedia({ ...media, file: undefined, data: buf });
       m++;
-      if (m % 25 === 0) statusText.textContent = `Importing media… ${m}/${data.media.length}`;
+      if (m % 25 === 0) statusText.textContent = `Importing media… ${m}`;
     }
 
-    statusText.textContent = `Imported ${t} threads, ${m} media files`;
-    await renderThreads();
-    await refreshStatus();
+    const parts = [];
+    if (added)     parts.push(`${added} new`);
+    if (updated)   parts.push(`${updated} updated`);
+    if (unchanged) parts.push(`${unchanged} already present`);
+    holdStatus(`Imported: ${parts.join(', ') || 'nothing new'} · ${m} media file${m === 1 ? '' : 's'} added`);
+    await renderThreads(); // reflect new threads without clobbering the message
   } catch (e) {
-    statusText.textContent = `Import failed: ${e.message}`;
+    holdStatus(`Import failed: ${e.message}`);
   } finally {
     importBtn.disabled = false;
   }
@@ -532,8 +552,12 @@ function makeZip(files) {
   return new Blob(parts, { type: 'application/zip' });
 }
 
-/** Parse a ZIP made by makeZip (or any STORE-only zip) → Map<name, Uint8Array>. */
-function parseZip(bytes) {
+/**
+ * Parse a ZIP → Map<name, Uint8Array>. Handles STORE (our exports) and
+ * DEFLATE (so a zip re-compressed by macOS/Finder or another tool still
+ * imports). Skips directory entries and macOS __MACOSX/ resource-fork noise.
+ */
+async function parseZip(bytes) {
   const u16 = i => bytes[i] | (bytes[i + 1] << 8);
   const u32 = i => (bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) >>> 0;
 
@@ -556,14 +580,28 @@ function parseZip(bytes) {
     const commentLen = u16(p + 32);
     const lho        = u32(p + 42);
     const name       = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
-    if (method !== 0) {
-      throw new Error('Zip uses compression — only Threads Archiver exports (uncompressed) are supported.');
-    }
-    const dataStart = lho + 30 + u16(lho + 26) + u16(lho + 28);
-    entries.set(name, bytes.subarray(dataStart, dataStart + csize));
     p += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/') || name.startsWith('__MACOSX/')) continue; // dir / mac noise
+    const dataStart = lho + 30 + u16(lho + 26) + u16(lho + 28);
+    const raw = bytes.subarray(dataStart, dataStart + csize);
+
+    if (method === 0) {
+      entries.set(name, raw);
+    } else if (method === 8) {
+      entries.set(name, await inflateRaw(raw)); // DEFLATE
+    } else {
+      throw new Error(`Zip entry "${name}" uses unsupported compression method ${method}.`);
+    }
   }
   return entries;
+}
+
+/** Raw-DEFLATE inflate via the platform DecompressionStream. */
+async function inflateRaw(bytes) {
+  const ds = new DecompressionStream('deflate-raw');
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 // ── utilities ──────────────────────────────────────────────────────────────────
