@@ -1123,15 +1123,25 @@ async function findOrCreateThreadsTab() {
     console.log(`[archiver] Waiting for loading tab ${loading.id}`);
     return waitForTabLoad(loading.id);
   }
-  // No Threads tab open — create one silently in the background
+  // No Threads tab open — create one silently in the background.
+  // Open /saved specifically — that page loads the Relay modules for the
+  // saved-posts queries, letting extractPageParams resolve them dynamically.
   console.log('[archiver] No Threads tab found — opening one');
-  return new Promise(resolve => {
-    // Open /saved specifically — that page loads the Relay modules for the
-    // saved-posts queries, letting extractPageParams resolve them dynamically.
-    chrome.tabs.create({ url: 'https://www.threads.com/saved', active: false }, tab => {
-      waitForTabLoad(tab.id).then(resolve);
+  const tab = await new Promise(resolve => {
+    chrome.tabs.create({ url: 'https://www.threads.com/saved', active: false }, t => {
+      // On failure Chrome sets lastError and passes null (e.g. an alarm fired
+      // while no normal browser window is open — nowhere to host the tab).
+      void chrome.runtime.lastError;
+      resolve(t ?? null);
     });
   });
+  if (!tab?.id) {
+    throw new Error(
+      'Could not open a Threads tab (no browser window available). ' +
+      'Open threads.com in a tab, make sure you are logged in, then sync again.'
+    );
+  }
+  return waitForTabLoad(tab.id);
 }
 
 function waitForTabLoad(tabId) {
