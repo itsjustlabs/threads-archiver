@@ -1341,23 +1341,25 @@ async function extractPageParams(tabId) {
  * Returns the tab ID once the page is fully loaded.
  */
 async function findOrCreateThreadsTab() {
-  // Prefer an already-complete Threads tab
+  // Only reuse a tab that is on /saved. That page is what loads the Relay
+  // modules for the saved-posts queries; on any other Threads page (e.g. the
+  // home feed) extractPageParams can't read live doc_ids and silently falls
+  // back to the snapshot in shared/api.js, which breaks once Meta rotates them.
   const existing = await chrome.tabs.query({ url: 'https://*.threads.com/*' });
-  const complete  = existing.find(t => t.status === 'complete');
+  const saved    = existing.filter(t => isSavedPage(t.url));
+  const complete = saved.find(t => t.status === 'complete');
   if (complete) {
-    console.log(`[archiver] Reusing existing tab ${complete.id}`);
+    console.log(`[archiver] Reusing existing /saved tab ${complete.id}`);
     return complete.id;
   }
-  // A tab is loading — wait for it
-  if (existing.length) {
-    const loading = existing[0];
-    console.log(`[archiver] Waiting for loading tab ${loading.id}`);
+  // A /saved tab is loading — wait for it
+  if (saved.length) {
+    const loading = saved[0];
+    console.log(`[archiver] Waiting for loading /saved tab ${loading.id}`);
     return waitForTabLoad(loading.id);
   }
-  // No Threads tab open — create one silently in the background.
-  // Open /saved specifically — that page loads the Relay modules for the
-  // saved-posts queries, letting extractPageParams resolve them dynamically.
-  console.log('[archiver] No Threads tab found — opening one');
+  // No /saved tab open — create one silently in the background.
+  console.log(`[archiver] No /saved tab found (${existing.length} other Threads tab(s) open) — opening one`);
   const tab = await new Promise(resolve => {
     chrome.tabs.create({ url: 'https://www.threads.com/saved', active: false }, t => {
       // On failure Chrome sets lastError and passes null (e.g. an alarm fired
@@ -1373,6 +1375,11 @@ async function findOrCreateThreadsTab() {
     );
   }
   return waitForTabLoad(tab.id);
+}
+
+function isSavedPage(url) {
+  try { return new URL(url).pathname.replace(/\/+$/, '') === '/saved'; }
+  catch { return false; }
 }
 
 function waitForTabLoad(tabId) {

@@ -136,6 +136,7 @@ function resolveQuery(key) {
   if (!def) throw new Error(`Unknown query key: ${key}`);
   const dyn = _metaCache?.queries?.[key];
   return {
+    live:      Boolean(dyn?.docId),
     name:      dyn?.name  ?? def.name,
     docId:     dyn?.docId ?? def.docId,
     providers: (dyn?.providers && Object.keys(dyn.providers).length)
@@ -177,10 +178,10 @@ export async function gqlQuery(queryKey, variables = {}) {
   // Meta returns HTTP 200 + {"errors":[{"message":"execution error"...}], "data":null}
   // when the doc_id is stale or variables don't match the persisted query.
   if (!json?.data && json?.errors?.length) {
-    throw new Error(
-      `GraphQL execution error for ${q.name} (doc_id ${q.docId}) — ` +
-      `doc_id or provider variables may have rotated. Re-sync with a freshly loaded Threads tab.`
-    );
+    const source = q.live
+      ? 'read live from the Threads /saved page, so Threads may have renamed or changed this query'
+      : 'built-in fallback — the live value could not be read from the Threads /saved tab';
+    throw new Error(`GraphQL execution error for ${q.name} (doc_id ${q.docId}, ${source}).`);
   }
 
   return json;
