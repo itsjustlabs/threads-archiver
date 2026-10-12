@@ -287,7 +287,7 @@ async function ensureBridgeReady() {
   const dynQueries = pageParams.queries ?? {};
   console.log('[archiver] Dynamic query params: ' + JSON.stringify(
     Object.fromEntries(Object.entries(dynQueries).map(([k, v]) =>
-      [k, v ? `${v.docId} (${Object.keys(v.providers ?? {}).length} providers)` : '(fallback to snapshot)']))));
+      [k, v ? `${v.docId} (${Object.keys(v.providers ?? {}).length} providers, ${(v.args ?? []).length} declared args)` : '(fallback to snapshot)']))));
 
   setMetaParams({
     lsd:      pageParams.lsd,
@@ -1309,7 +1309,12 @@ async function extractPageParams(tabId) {
                 }
               } catch {}
             }
-            queries[key] = { docId: String(req.params.id), name: req.params.name, providers };
+            // The arguments the live query declares, so a mismatch with what we
+            // send can be reported (Threads itself only says "execution error").
+            // Provided variables (__relay_internal__pv__*) are listed here too.
+            const defs = req.operation?.argumentDefinitions ?? req.fragment?.argumentDefinitions ?? [];
+            const args = defs.map(a => ({ name: a.name, required: a.defaultValue == null }));
+            queries[key] = { docId: String(req.params.id), name: req.params.name, providers, args };
           } else {
             queries[key] = null;
           }

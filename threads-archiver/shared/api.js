@@ -137,6 +137,7 @@ function resolveQuery(key) {
   const dyn = _metaCache?.queries?.[key];
   return {
     live:      Boolean(dyn?.docId),
+    args:      dyn?.args ?? null,
     name:      dyn?.name  ?? def.name,
     docId:     dyn?.docId ?? def.docId,
     providers: (dyn?.providers && Object.keys(dyn.providers).length)
@@ -184,10 +185,19 @@ export async function gqlQuery(queryKey, variables = {}) {
     // Threads' own messages, plus the variable names sent: a live doc_id that
     // still fails usually means the query's expected variables changed.
     const reasons = json.errors.slice(0, 3).map(e => e?.message ?? JSON.stringify(e)).join(' | ');
-    const sent    = Object.keys({ ...variables, ...q.providers }).join(', ');
+    const sent    = Object.keys({ ...variables, ...q.providers });
+    let diff = `Variables sent: ${sent.join(', ')}.`;
+    if (q.args) {
+      const declared = q.args.map(a => a.name);
+      const missing  = q.args.filter(a => a.required && !sent.includes(a.name)).map(a => a.name);
+      const extra    = sent.filter(n => !declared.includes(n));
+      diff = `Query declares: ${declared.join(', ')}. ` +
+             `Missing required: ${missing.join(', ') || 'none'}. ` +
+             `Sent but not declared: ${extra.join(', ') || 'none'}.`;
+    }
     throw new Error(
       `GraphQL execution error for ${q.name} (doc_id ${q.docId}, ${source}). ` +
-      `Threads said: ${reasons}. Variables sent: ${sent}.`
+      `Threads said: ${reasons}. ${diff}`
     );
   }
 
