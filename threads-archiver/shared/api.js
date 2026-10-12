@@ -181,7 +181,14 @@ export async function gqlQuery(queryKey, variables = {}) {
     const source = q.live
       ? 'read live from the Threads /saved page, so Threads may have renamed or changed this query'
       : 'built-in fallback — the live value could not be read from the Threads /saved tab';
-    throw new Error(`GraphQL execution error for ${q.name} (doc_id ${q.docId}, ${source}).`);
+    // Threads' own messages, plus the variable names sent: a live doc_id that
+    // still fails usually means the query's expected variables changed.
+    const reasons = json.errors.slice(0, 3).map(e => e?.message ?? JSON.stringify(e)).join(' | ');
+    const sent    = Object.keys({ ...variables, ...q.providers }).join(', ');
+    throw new Error(
+      `GraphQL execution error for ${q.name} (doc_id ${q.docId}, ${source}). ` +
+      `Threads said: ${reasons}. Variables sent: ${sent}.`
+    );
   }
 
   return json;

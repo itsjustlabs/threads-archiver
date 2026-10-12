@@ -276,18 +276,18 @@ async function ensureBridgeReady() {
   console.log(`[archiver] Bridge ready on tab ${tabId}`);
 
   const pageParams = await extractPageParams(tabId);
-  console.log('[archiver] Page params:', {
+  console.log('[archiver] Page params: ' + JSON.stringify({
     lsd: pageParams.lsd ? pageParams.lsd.slice(0, 10) + '…' : '(empty)',
     __rev: pageParams.__rev,
     dsUserId: pageParams.dsUserId,
-  });
+  }));
   if (!pageParams.lsd) {
     throw new AuthError('Could not read auth tokens from Threads. Make sure the Threads tab is fully loaded and you are logged in.');
   }
   const dynQueries = pageParams.queries ?? {};
-  console.log('[archiver] Dynamic query params:',
+  console.log('[archiver] Dynamic query params: ' + JSON.stringify(
     Object.fromEntries(Object.entries(dynQueries).map(([k, v]) =>
-      [k, v ? `${v.docId} (${Object.keys(v.providers ?? {}).length} providers)` : '(fallback to snapshot)'])));
+      [k, v ? `${v.docId} (${Object.keys(v.providers ?? {}).length} providers)` : '(fallback to snapshot)']))));
 
   setMetaParams({
     lsd:      pageParams.lsd,

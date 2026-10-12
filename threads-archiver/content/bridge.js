@@ -100,9 +100,10 @@ async function handleGQL(body, friendlyName) {
   const json = JSON.parse(text.replace(/^for \(;;\);/, ''));
 
   // Log the top-level shape so you can see it in the Threads tab console
-  console.log(`[archiver bridge] ${friendlyName ?? 'GQL'} response:`,
-    json?.errors?.length ? `${json.errors.length} error(s)` : 'ok',
-    'data keys:', Object.keys(json?.data ?? {}));
+  const errs = json?.errors ?? [];
+  console.log(`[archiver bridge] ${friendlyName ?? 'GQL'} response: ` +
+    (errs.length ? `${errs.length} error(s), first: ${JSON.stringify(errs.slice(0, 2).map(e => e?.message ?? e))}` : 'ok') +
+    `, data keys: ${JSON.stringify(Object.keys(json?.data ?? {}))}`);
 
   return { ok: true, json };
 }
