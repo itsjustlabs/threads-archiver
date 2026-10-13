@@ -1270,6 +1270,8 @@ async function diagnosePagination() {
         // always, variables only for the query we care about.
         const captured = [];
         const headerNames = new WeakMap();
+        const headerPairs = new WeakMap();   // values stay in the page; never returned
+        const urlOf = new WeakMap();
         const parseBody = (body) => {
           try {
             const p = new URLSearchParams(
@@ -1292,15 +1294,28 @@ async function diagnosePagination() {
         const origSend = XMLHttpRequest.prototype.send;
         const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
         const origFetch = window.fetch;
+        const origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function (method, url) {
+          urlOf.set(this, { method, url: String(url) });
+          return origOpen.apply(this, arguments);
+        };
         XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
           const list = headerNames.get(this) ?? [];
           list.push(String(k).toLowerCase()); headerNames.set(this, list);
+          const pairs = headerPairs.get(this) ?? [];
+          pairs.push([String(k), String(v)]); headerPairs.set(this, pairs);
           return origSetHeader.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function (body) {
           const req = parseBody(body);
           if (req) {
             const entry = { via: 'xhr', req, headers: (headerNames.get(this) ?? []).sort() };
+            if (req.name === wantName) {
+              const rawBody = (body instanceof FormData || body instanceof URLSearchParams)
+                ? new URLSearchParams(body).toString() : String(body);
+              entry._raw = { ...(urlOf.get(this) ?? { method: 'POST', url: '/graphql/query' }), body: rawBody,
+                             headers: headerPairs.get(this) ?? [] };
+            }
             captured.push(entry);
             this.addEventListener('load', () => { entry.status = this.status; entry.res = parseResponse(this.responseText); });
           }
@@ -1331,11 +1346,45 @@ async function diagnosePagination() {
             await new Promise(r => setTimeout(r, 2500));
           }
         } finally {
+          XMLHttpRequest.prototype.open = origOpen;
           XMLHttpRequest.prototype.send = origSend;
           XMLHttpRequest.prototype.setRequestHeader = origSetHeader;
           window.fetch = origFetch;
         }
-        return { visibility: document.visibilityState, captured: captured.slice(0, 12) };
+
+        // Replay the page's own successful pagination request, changing one
+        // thing at a time, to find which difference makes Threads refuse ours.
+        const replays = [];
+        const ok = captured.find(c => c.req.name === wantName && c._raw && c.status === 200 && !c.res?.errorCount);
+        if (ok) {
+          const OUR_HEADERS = ['accept', 'content-type', 'x-csrftoken', 'x-fb-friendly-name', 'x-fb-lsd', 'x-ig-app-id'];
+          const send = (body, headers) => new Promise(resolve => {
+            const x = new XMLHttpRequest();
+            x.open(ok._raw.method, ok._raw.url);
+            for (const [k, v] of headers) x.setRequestHeader(k, v);
+            x.onload = () => resolve({ status: x.status, ...parseResponse(x.responseText) });
+            x.onerror = () => resolve({ status: 'network error' });
+            x.send(body);
+          });
+          const variants = {
+            'A exact replay (control)':     p => p,
+            'B page size 20':               p => { const v = JSON.parse(p.get('variables')); v.first = 20; p.set('variables', JSON.stringify(v)); return p; },
+            'C without fb_dtsg + jazoest':  p => { p.delete('fb_dtsg'); p.delete('jazoest'); return p; },
+            'D only our headers':           p => p,
+          };
+          for (const [label, mutate] of Object.entries(variants)) {
+            const params = mutate(new URLSearchParams(ok._raw.body));
+            const headers = label.startsWith('D')
+              ? ok._raw.headers.filter(([k]) => OUR_HEADERS.includes(k.toLowerCase()))
+              : ok._raw.headers;
+            const r = await send(params.toString(), headers);
+            replays.push({ variant: label, status: r.status, errorCount: r.errorCount ?? null,
+                           error: r.errors?.[0] ?? r.unparsable ?? null });
+            await new Promise(res => setTimeout(res, 800));   // don't hammer Threads
+          }
+        }
+        for (const c of captured) delete c._raw;   // nothing with token values leaves the page
+        return { visibility: document.visibilityState, captured: captured.slice(0, 12), replays };
       },
     });
   } finally {
@@ -1372,6 +1421,8 @@ async function diagnosePagination() {
   } else {
     summary.pagination = 'page did not paginate during the experiment';
   }
+  summary.replays = captured?.replays?.length ? captured.replays
+    : 'no successful page pagination request to replay';
   console.log('[archiver] Page\'s own requests vs ours: ' + JSON.stringify(summary));
 }
 
