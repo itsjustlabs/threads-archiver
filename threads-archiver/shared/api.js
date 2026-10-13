@@ -219,6 +219,9 @@ export async function gqlQuery(queryKey, variables = {}) {
 
 // ── saved posts pagination ────────────────────────────────────────────────────
 
+const SAVED_PAGE_SIZE     = 4;
+const SAVED_PAGE_DELAY_MS = 400;
+
 export async function fetchAllSaved(onPage) {
   // Viewer query takes NO plain variables — provider flags only.
   let json  = await gqlQuery('SAVED_VIEWER');
@@ -232,7 +235,11 @@ export async function fetchAllSaved(onPage) {
 
   while (hasNext && cursor) {
     // Refetch query paginates with { first, after } (NOT count/cursor).
-    json    = await gqlQuery('SAVED_REFETCH', { first: 20, after: cursor });
+    // Page size must match what Threads' own /saved page asks for: replaying
+    // the page's request with first: 20 instead of 4 returned "execution error",
+    // with no other change. Pause between pages so the extra requests stay gentle.
+    await new Promise(r => setTimeout(r, SAVED_PAGE_DELAY_MS));
+    json    = await gqlQuery('SAVED_REFETCH', { first: SAVED_PAGE_SIZE, after: cursor });
     saved   = json?.data?.xdt_text_app_viewer?.saved_media;
     if (!saved) break;
     await onPage(saved.edges ?? []);
