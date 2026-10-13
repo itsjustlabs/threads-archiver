@@ -1250,88 +1250,129 @@ function guessMime(url, fallback) {
 async function diagnosePagination() {
   const ours  = getLastRequest();
   const tabId = await findOrCreateThreadsTab();
-  const [{ result: captured } = {}] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world:  'MAIN',
-    args:   [ours?.name ?? 'BarcelonaSavedPageRefetchableQuery'],
-    func:   async (wantName) => {
-      const captured = [];
-      const parseBody = (body) => {
-        try {
-          const p = new URLSearchParams(
-            (body instanceof FormData || body instanceof URLSearchParams || typeof body === 'string') ? body : '');
-          if (p.get('fb_api_req_friendly_name') !== wantName) return null;
-          let variables = {};
-          try { variables = JSON.parse(p.get('variables') || '{}'); } catch {}
-          return { docId: p.get('doc_id'), formKeys: [...p.keys()].sort(), variables };
-        } catch { return null; }
-      };
-      const parseResponse = (text) => {
-        try {
-          const j = JSON.parse(String(text).replace(/^for \(;;\);/, ''));
-          return { errors: (j.errors ?? []).slice(0, 2).map(e => e?.message ?? e),
-                   errorCount: (j.errors ?? []).length,
-                   dataKeys: Object.keys(j.data ?? {}) };
-        } catch (e) { return { unparsable: String(e).slice(0, 80) }; }
-      };
-      const origSend = XMLHttpRequest.prototype.send, origFetch = window.fetch;
-      XMLHttpRequest.prototype.send = function (body) {
-        const req = parseBody(body);
-        if (req) {
-          const entry = { via: 'xhr', req };
-          captured.push(entry);
-          this.addEventListener('load', () => { entry.status = this.status; entry.res = parseResponse(this.responseText); });
-        }
-        return origSend.apply(this, arguments);
-      };
-      window.fetch = async function (input, init) {
-        const req = parseBody(init?.body);
-        const res = await origFetch.apply(this, arguments);
-        if (req) {
-          const entry = { via: 'fetch', req, status: res.status };
-          captured.push(entry);
-          try { entry.res = parseResponse(await res.clone().text()); } catch {}
-        }
-        return res;
-      };
-      try {
-        // Scroll to the bottom until the page has asked for (and got) a next page.
-        for (let i = 0; i < 6 && !captured.some(c => c.res); i++) {
-          window.scrollTo(0, document.documentElement.scrollHeight);
-          await new Promise(r => setTimeout(r, 2500));
-        }
-      } finally {
-        XMLHttpRequest.prototype.send = origSend;
-        window.fetch = origFetch;
-      }
-      return captured.slice(0, 3);
-    },
-  });
 
-  if (!captured?.length) {
-    console.log('[archiver] Page\'s own pagination: no request captured while scrolling ' +
-      '(nothing more to load, or scrolling did not trigger it)');
-    return;
+  // Hidden tabs skip rendering, so the page's infinite-scroll observer never
+  // fires there. Bring the tab to the front for the experiment, then put back
+  // whatever was in front before.
+  const tab = await chrome.tabs.get(tabId);
+  const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+  await chrome.tabs.update(tabId, { active: true });
+  await new Promise(r => setTimeout(r, 1500));
+
+  let captured;
+  try {
+    [{ result: captured } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world:  'MAIN',
+      args:   [ours?.name ?? 'BarcelonaSavedPageRefetchableQuery'],
+      func:   async (wantName) => {
+        // Capture every GraphQL request the page makes: field and header names
+        // always, variables only for the query we care about.
+        const captured = [];
+        const headerNames = new WeakMap();
+        const parseBody = (body) => {
+          try {
+            const p = new URLSearchParams(
+              (body instanceof FormData || body instanceof URLSearchParams || typeof body === 'string') ? body : '');
+            const name = p.get('fb_api_req_friendly_name');
+            if (!name) return null;
+            let variables;
+            if (name === wantName) { try { variables = JSON.parse(p.get('variables') || '{}'); } catch {} }
+            return { name, docId: p.get('doc_id'), formKeys: [...p.keys()].sort(), variables };
+          } catch { return null; }
+        };
+        const parseResponse = (text) => {
+          try {
+            const j = JSON.parse(String(text).replace(/^for \(;;\);/, ''));
+            return { errors: (j.errors ?? []).slice(0, 2).map(e => e?.message ?? e),
+                     errorCount: (j.errors ?? []).length,
+                     dataKeys: Object.keys(j.data ?? {}) };
+          } catch (e) { return { unparsable: String(e).slice(0, 80) }; }
+        };
+        const origSend = XMLHttpRequest.prototype.send;
+        const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+        const origFetch = window.fetch;
+        XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+          const list = headerNames.get(this) ?? [];
+          list.push(String(k).toLowerCase()); headerNames.set(this, list);
+          return origSetHeader.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function (body) {
+          const req = parseBody(body);
+          if (req) {
+            const entry = { via: 'xhr', req, headers: (headerNames.get(this) ?? []).sort() };
+            captured.push(entry);
+            this.addEventListener('load', () => { entry.status = this.status; entry.res = parseResponse(this.responseText); });
+          }
+          return origSend.apply(this, arguments);
+        };
+        window.fetch = async function (input, init) {
+          const req = parseBody(init?.body);
+          const res = await origFetch.apply(this, arguments);
+          if (req) {
+            const h = init?.headers instanceof Headers ? [...init.headers.keys()] : Object.keys(init?.headers ?? {});
+            const entry = { via: 'fetch', req, headers: h.map(k => k.toLowerCase()).sort(), status: res.status };
+            captured.push(entry);
+            try { entry.res = parseResponse(await res.clone().text()); } catch {}
+          }
+          return res;
+        };
+        const scrollAll = () => {
+          window.scrollTo(0, document.documentElement.scrollHeight);
+          for (const el of document.querySelectorAll('*')) {
+            if (el.scrollHeight > el.clientHeight + 50 && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) {
+              el.scrollTop = el.scrollHeight;
+            }
+          }
+        };
+        try {
+          for (let i = 0; i < 8 && !captured.some(c => c.req.name === wantName && c.res); i++) {
+            scrollAll();
+            await new Promise(r => setTimeout(r, 2500));
+          }
+        } finally {
+          XMLHttpRequest.prototype.send = origSend;
+          XMLHttpRequest.prototype.setRequestHeader = origSetHeader;
+          window.fetch = origFetch;
+        }
+        return { visibility: document.visibilityState, captured: captured.slice(0, 12) };
+      },
+    });
+  } finally {
+    if (prev?.id && prev.id !== tabId) await chrome.tabs.update(prev.id, { active: true }).catch(() => {});
   }
+
+  const list = captured?.captured ?? [];
+  // Headers the bridge sends (content/bridge.js handleGQL), lower-cased.
+  const OUR_HEADERS = ['accept', 'content-type', 'x-csrftoken', 'x-fb-friendly-name', 'x-fb-lsd', 'x-ig-app-id'];
+  const ourForm = ours?.formKeys ?? [];
+  const union = key => [...new Set(list.flatMap(c => key(c)))].sort();
+  const summary = {
+    tabVisibility: captured?.visibility,
+    pageRequests: list.map(c => `${c.req.name} -> ${c.status ?? 'pending'}${c.res?.errorCount ? ` (${c.res.errorCount} errors)` : ''}`),
+    formFieldsPageOnly: union(c => c.req.formKeys).filter(k => !ourForm.includes(k)),
+    formFieldsOursOnly: ourForm.filter(k => !union(c => c.req.formKeys).includes(k)),
+    headersPageOnly: union(c => c.headers ?? []).filter(h => !OUR_HEADERS.includes(h)),
+  };
   // Cursors and long strings are summarised as length + short prefix.
   const show = v => (typeof v === 'string' && v.length > 24) ? `<${v.length} chars, ${v.slice(0, 6)}…>` : v;
-  const theirs = captured[0];
-  const tv = theirs.req.variables ?? {}, ov = ours?.variables ?? {};
-  const differing = {};
-  for (const k of new Set([...Object.keys(tv), ...Object.keys(ov)])) {
-    if (JSON.stringify(tv[k]) !== JSON.stringify(ov[k])) differing[k] = { page: show(tv[k]), ours: show(ov[k]) };
+  const theirs = list.find(c => c.req.name === ours?.name && c.req.variables);
+  if (theirs) {
+    const tv = theirs.req.variables, ov = ours?.variables ?? {};
+    const differing = {};
+    for (const k of new Set([...Object.keys(tv), ...Object.keys(ov)])) {
+      if (JSON.stringify(tv[k]) !== JSON.stringify(ov[k])) differing[k] = { page: show(tv[k]), ours: show(ov[k]) };
+    }
+    summary.pagination = {
+      pageRequestSucceeded: theirs.status === 200 && !theirs.res?.errorCount,
+      response: theirs.res,
+      sameDocId: theirs.req.docId === ours?.docId,
+      variablesThatDiffer: differing,
+    };
+  } else {
+    summary.pagination = 'page did not paginate during the experiment';
   }
-  const summary = {
-    pageRequestSucceeded: theirs.status === 200 && !(theirs.res?.errorCount),
-    page: { via: theirs.via, status: theirs.status, response: theirs.res },
-    sameDocId: theirs.req.docId === ours?.docId,
-    docIds: { page: theirs.req.docId, ours: ours?.docId },
-    formFieldsPageOnly: theirs.req.formKeys.filter(k => !(ours?.formKeys ?? []).includes(k)),
-    formFieldsOursOnly: (ours?.formKeys ?? []).filter(k => !theirs.req.formKeys.includes(k)),
-    variablesThatDiffer: differing,
-    pageRequestsCaptured: captured.length,
-  };
-  console.log('[archiver] Page\'s own pagination: ' + JSON.stringify(summary));
+  console.log('[archiver] Page\'s own requests vs ours: ' + JSON.stringify(summary));
 }
 
 // ── page param extraction (MAIN world) ────────────────────────────────────────
