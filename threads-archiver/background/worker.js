@@ -11,7 +11,7 @@
  */
 
 import {
-  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts,
+  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest,
   downloadMedia, normalizePost, AuthError, QUERY_DEFS, codeToPk,
   extractImages, extractVideos,
 } from '../shared/api.js';
@@ -254,6 +254,10 @@ async function runSync() {
       await setSyncStatus('auth_error', { message: e.message });
     } else {
       console.error('[archiver] Sync error:', e);
+      if (/BarcelonaSavedPageRefetchableQuery/.test(e.message)) {
+        await diagnosePagination().catch(err =>
+          console.warn('[archiver] Pagination diagnostic failed: ' + err.message));
+      }
       await setSyncStatus('error', { message: e.message });
     }
   } finally {
@@ -1236,6 +1240,99 @@ function guessMime(url, fallback) {
 
 // extractImages / extractVideos are imported from shared/api.js — a video's
 // image_versions2 is its poster frame, attached as videos[].posterUrl.
+
+// ── pagination diagnostic (temporary) ─────────────────────────────────────────
+// Our next-page query fails with a bare "execution error" even though its
+// doc_id and variable names match the live page. To find the difference, let
+// the /saved page paginate by itself, capture that request, and compare it with
+// ours. Logs a single line; values that could be sensitive are summarised.
+
+async function diagnosePagination() {
+  const ours  = getLastRequest();
+  const tabId = await findOrCreateThreadsTab();
+  const [{ result: captured } = {}] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world:  'MAIN',
+    args:   [ours?.name ?? 'BarcelonaSavedPageRefetchableQuery'],
+    func:   async (wantName) => {
+      const captured = [];
+      const parseBody = (body) => {
+        try {
+          const p = new URLSearchParams(
+            (body instanceof FormData || body instanceof URLSearchParams || typeof body === 'string') ? body : '');
+          if (p.get('fb_api_req_friendly_name') !== wantName) return null;
+          let variables = {};
+          try { variables = JSON.parse(p.get('variables') || '{}'); } catch {}
+          return { docId: p.get('doc_id'), formKeys: [...p.keys()].sort(), variables };
+        } catch { return null; }
+      };
+      const parseResponse = (text) => {
+        try {
+          const j = JSON.parse(String(text).replace(/^for \(;;\);/, ''));
+          return { errors: (j.errors ?? []).slice(0, 2).map(e => e?.message ?? e),
+                   errorCount: (j.errors ?? []).length,
+                   dataKeys: Object.keys(j.data ?? {}) };
+        } catch (e) { return { unparsable: String(e).slice(0, 80) }; }
+      };
+      const origSend = XMLHttpRequest.prototype.send, origFetch = window.fetch;
+      XMLHttpRequest.prototype.send = function (body) {
+        const req = parseBody(body);
+        if (req) {
+          const entry = { via: 'xhr', req };
+          captured.push(entry);
+          this.addEventListener('load', () => { entry.status = this.status; entry.res = parseResponse(this.responseText); });
+        }
+        return origSend.apply(this, arguments);
+      };
+      window.fetch = async function (input, init) {
+        const req = parseBody(init?.body);
+        const res = await origFetch.apply(this, arguments);
+        if (req) {
+          const entry = { via: 'fetch', req, status: res.status };
+          captured.push(entry);
+          try { entry.res = parseResponse(await res.clone().text()); } catch {}
+        }
+        return res;
+      };
+      try {
+        // Scroll to the bottom until the page has asked for (and got) a next page.
+        for (let i = 0; i < 6 && !captured.some(c => c.res); i++) {
+          window.scrollTo(0, document.documentElement.scrollHeight);
+          await new Promise(r => setTimeout(r, 2500));
+        }
+      } finally {
+        XMLHttpRequest.prototype.send = origSend;
+        window.fetch = origFetch;
+      }
+      return captured.slice(0, 3);
+    },
+  });
+
+  if (!captured?.length) {
+    console.log('[archiver] Page\'s own pagination: no request captured while scrolling ' +
+      '(nothing more to load, or scrolling did not trigger it)');
+    return;
+  }
+  // Cursors and long strings are summarised as length + short prefix.
+  const show = v => (typeof v === 'string' && v.length > 24) ? `<${v.length} chars, ${v.slice(0, 6)}…>` : v;
+  const theirs = captured[0];
+  const tv = theirs.req.variables ?? {}, ov = ours?.variables ?? {};
+  const differing = {};
+  for (const k of new Set([...Object.keys(tv), ...Object.keys(ov)])) {
+    if (JSON.stringify(tv[k]) !== JSON.stringify(ov[k])) differing[k] = { page: show(tv[k]), ours: show(ov[k]) };
+  }
+  const summary = {
+    pageRequestSucceeded: theirs.status === 200 && !(theirs.res?.errorCount),
+    page: { via: theirs.via, status: theirs.status, response: theirs.res },
+    sameDocId: theirs.req.docId === ours?.docId,
+    docIds: { page: theirs.req.docId, ours: ours?.docId },
+    formFieldsPageOnly: theirs.req.formKeys.filter(k => !(ours?.formKeys ?? []).includes(k)),
+    formFieldsOursOnly: (ours?.formKeys ?? []).filter(k => !theirs.req.formKeys.includes(k)),
+    variablesThatDiffer: differing,
+    pageRequestsCaptured: captured.length,
+  };
+  console.log('[archiver] Page\'s own pagination: ' + JSON.stringify(summary));
+}
 
 // ── page param extraction (MAIN world) ────────────────────────────────────────
 

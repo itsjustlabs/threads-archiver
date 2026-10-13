@@ -90,6 +90,12 @@ export const QUERY_DEFS = {
 let _bridgeTabId = null;
 let _metaCache   = null;
 
+// What the most recent gqlQuery() sent, for the pagination diagnostic in
+// worker.js: form field names only (values include session tokens) and the
+// GraphQL variables.
+let _lastRequest = null;
+export function getLastRequest() { return _lastRequest; }
+
 export function setBridgeTab(tabId) {
   _bridgeTabId = tabId;
   _metaCache   = null;
@@ -167,6 +173,13 @@ export async function gqlQuery(queryKey, variables = {}) {
     av:        meta._dsUserId,
     __user:    meta._dsUserId,
   });
+
+  _lastRequest = {
+    name:      q.name,
+    docId:     q.docId,
+    formKeys:  [...body.keys()].sort(),
+    variables: { ...variables, ...q.providers },
+  };
 
   const res  = await sendBridge({ type: 'BRIDGE_GQL', body: body.toString(), friendlyName: q.name });
   const json = res.json;
