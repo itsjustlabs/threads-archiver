@@ -112,11 +112,18 @@ export class AuthError extends Error {
 
 // ── bridge messaging ──────────────────────────────────────────────────────────
 
+const BRIDGE_TIMEOUT_MS = 90_000;
+
 async function sendBridge(msg) {
   if (!_bridgeTabId) throw new Error('No bridge tab — call setBridgeTab() first.');
   let res;
   try {
-    res = await chrome.tabs.sendMessage(_bridgeTabId, msg);
+    // If the Threads tab never answers, give up rather than wait forever.
+    res = await Promise.race([
+      chrome.tabs.sendMessage(_bridgeTabId, msg),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error(`no answer from the Threads tab after ${BRIDGE_TIMEOUT_MS / 1000}s`)), BRIDGE_TIMEOUT_MS)),
+    ]);
   } catch (e) {
     throw new Error(`Bridge unreachable (tab ${_bridgeTabId}): ${e.message}`);
   }
@@ -315,13 +322,15 @@ const MAX_MEDIA_BYTES = 100 * 1024 * 1024;
 
 export async function downloadMedia(url) {
   try {
-    const head = await fetch(url, { method: 'HEAD' }).catch(() => null);
+    // Time limits so a stalled CDN connection can't hang a sync forever.
+    const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15_000) }).catch(() => null);
     const len  = parseInt(head?.headers?.get('content-length') ?? '0', 10);
     if (len > MAX_MEDIA_BYTES) {
       console.warn(`[archiver] Skipping ${url}: ${len} bytes > 100 MB limit`);
       return null;
     }
-    const res = await fetch(url);
+    // The signal also covers reading the body below.
+    const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     if (buf.byteLength > MAX_MEDIA_BYTES) {

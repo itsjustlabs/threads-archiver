@@ -168,10 +168,31 @@ const setPaused = v => chrome.storage.local.set({ [PAUSE_KEY]: v });
 // ── main sync ──────────────────────────────────────────────────────────────────
 
 let _syncing = false;
+let _syncStartedAt = 0;
+let _syncRun = 0;          // so a hung run finishing late can't clear a newer run's flag
+const STALE_SYNC_MS = 45 * 60_000;
+const POST_TIMEOUT_MS = 5 * 60_000;
+
+// Settles with the promise, or rejects after ms. The original promise may keep
+// running in the background, but the sync no longer waits on it.
+function withTimeout(promise, ms, what) {
+  return Promise.race([promise, new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`${what} timed out after ${Math.round(ms / 1000)}s`)), ms))]);
+}
 
 async function runSync() {
-  if (_syncing) return;
+  if (_syncing) {
+    const mins = Math.round((Date.now() - _syncStartedAt) / 60_000);
+    if (Date.now() - _syncStartedAt < STALE_SYNC_MS) {
+      console.log(`[archiver] Sync skipped: the previous sync is still running (${mins} min)`);
+      return;
+    }
+    // A sync this old is hung, not busy; don't let it block every future sync.
+    console.warn(`[archiver] Previous sync has run ${mins} min; treating it as hung and starting a new one`);
+  }
   _syncing = true;
+  _syncStartedAt = Date.now();
+  const run = ++_syncRun;
   await setSyncStatus('syncing', { message: 'Starting sync…' });
   console.log('[archiver] Sync started');
 
@@ -215,11 +236,12 @@ async function runSync() {
       await setSyncStatus('syncing', {
         message: `Archiving post ${i + 1} of ${newNodes.length}…`,
       });
+      console.log(`[archiver] Archiving post ${i + 1}/${newNodes.length} (${code ?? '?'})`);
       try {
-        await archivePost(node);
+        await withTimeout(archivePost(node), POST_TIMEOUT_MS, `Archiving post ${code ?? '?'}`);
       } catch (e) {
         if (e instanceof AuthError) throw e; // propagate auth errors
-        console.warn('[archiver] Failed to archive post:', e.message);
+        console.warn('[archiver] Failed to archive post: ' + e.message);
       }
     }
 
@@ -261,8 +283,10 @@ async function runSync() {
       await setSyncStatus('error', { message: e.message });
     }
   } finally {
-    _pauseRequested = false;
-    _syncing = false;
+    if (run === _syncRun) {
+      _pauseRequested = false;
+      _syncing = false;
+    }
   }
 }
 
@@ -460,8 +484,10 @@ async function runFullRefresh(resumeCodes = null) {
       await setSyncStatus(e instanceof AuthError ? 'auth_error' : 'error', { message: e.message });
     }
   } finally {
-    _pauseRequested = false;
-    _syncing = false;
+    if (run === _syncRun) {
+      _pauseRequested = false;
+      _syncing = false;
+    }
   }
 }
 

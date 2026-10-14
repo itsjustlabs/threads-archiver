@@ -93,6 +93,7 @@ async function handleGQL(body, friendlyName) {
       'Accept':             '*/*',
     },
     body,
+    signal: AbortSignal.timeout(60_000),
   });
 
   if (!res.ok) throw new Error(`HTTP ${res.status} from GraphQL`);
