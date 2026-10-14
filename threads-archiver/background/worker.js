@@ -193,6 +193,11 @@ async function runSync() {
   _syncing = true;
   _syncStartedAt = Date.now();
   const run = ++_syncRun;
+  // Chrome stops an extension's service worker after ~30s without extension
+  // events or API calls, and waiting on a long media download doesn't count.
+  // That killed syncs mid-archive with nothing logged: every timer and flag
+  // died with the worker. Any extension API call resets the idle timer.
+  const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20_000);
   await setSyncStatus('syncing', { message: 'Starting sync…' });
   console.log('[archiver] Sync started');
 
@@ -283,6 +288,7 @@ async function runSync() {
       await setSyncStatus('error', { message: e.message });
     }
   } finally {
+    clearInterval(keepAlive);
     if (run === _syncRun) {
       _pauseRequested = false;
       _syncing = false;
@@ -484,6 +490,7 @@ async function runFullRefresh(resumeCodes = null) {
       await setSyncStatus(e instanceof AuthError ? 'auth_error' : 'error', { message: e.message });
     }
   } finally {
+    clearInterval(keepAlive);
     if (run === _syncRun) {
       _pauseRequested = false;
       _syncing = false;
