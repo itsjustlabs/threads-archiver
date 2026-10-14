@@ -321,28 +321,48 @@ export async function fetchCounts(postIds) {
 
 const MAX_MEDIA_BYTES = 100 * 1024 * 1024;
 
-export async function downloadMedia(url) {
+// Meta sometimes serves media from ISP-hosted caches (*.fna.fbcdn.net) in other
+// countries. A firewall that geo-blocks those countries drops the connection,
+// so the download hangs until its time limit. The same signed URL works on
+// Meta's global host, so try that first and keep the original as a fallback.
+const GLOBAL_CDN_HOST = 'scontent.cdninstagram.com';
+
+function cdnCandidates(url) {
   try {
-    // Time limits so a stalled CDN connection can't hang a sync forever.
-    const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(15_000) }).catch(() => null);
-    const len  = parseInt(head?.headers?.get('content-length') ?? '0', 10);
-    if (len > MAX_MEDIA_BYTES) {
-      console.warn(`[archiver] Skipping ${url}: ${len} bytes > 100 MB limit`);
-      return null;
+    const u = new URL(url);
+    if (u.hostname.endsWith('.fna.fbcdn.net')) {
+      const global = new URL(url);
+      global.hostname = GLOBAL_CDN_HOST;
+      return [global.toString(), url];
     }
-    // The signal also covers reading the body below.
-    const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-    if (!res.ok) return null;
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength > MAX_MEDIA_BYTES) {
-      console.warn(`[archiver] Discarding ${url}: body was ${buf.byteLength} bytes`);
-      return null;
+  } catch {}
+  return [url];
+}
+
+export async function downloadMedia(url) {
+  for (const candidate of cdnCandidates(url)) {
+    try {
+      // Time limits so a stalled connection can't hang a sync forever.
+      const head = await fetch(candidate, { method: 'HEAD', signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      const len  = parseInt(head?.headers?.get('content-length') ?? '0', 10);
+      if (len > MAX_MEDIA_BYTES) {
+        console.warn(`[archiver] Skipping ${url}: ${len} bytes > 100 MB limit`);
+        return null;
+      }
+      // The signal also covers reading the body below.
+      const res = await fetch(candidate, { signal: AbortSignal.timeout(120_000) });
+      if (!res.ok) continue;
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength > MAX_MEDIA_BYTES) {
+        console.warn(`[archiver] Discarding ${url}: body was ${buf.byteLength} bytes`);
+        return null;
+      }
+      return buf;
+    } catch (e) {
+      console.warn(`[archiver] Failed to download ${candidate}: ` + e.message);
     }
-    return buf;
-  } catch (e) {
-    console.warn(`[archiver] Failed to download ${url}:`, e.message);
-    return null;
   }
+  return null;
 }
 
 // ── raw-edge normalizer ───────────────────────────────────────────────────────
