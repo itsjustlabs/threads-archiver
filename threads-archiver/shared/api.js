@@ -235,7 +235,8 @@ export async function fetchAllSaved(onPage) {
   let saved = json?.data?.xdt_text_app_viewer?.saved_media;
   if (!saved) throw new AuthError('Could not fetch saved posts — are you logged in to Threads?');
 
-  await onPage(saved.edges ?? []);
+  // onPage returns false to stop early (incremental sync: nothing new here).
+  if (await onPage(saved.edges ?? []) === false) return;
 
   let cursor  = saved.page_info?.end_cursor;
   let hasNext = saved.page_info?.has_next_page;
@@ -249,7 +250,7 @@ export async function fetchAllSaved(onPage) {
     json    = await gqlQuery('SAVED_REFETCH', { first: SAVED_PAGE_SIZE, after: cursor });
     saved   = json?.data?.xdt_text_app_viewer?.saved_media;
     if (!saved) break;
-    await onPage(saved.edges ?? []);
+    if (await onPage(saved.edges ?? []) === false) return;
     cursor  = saved.page_info?.end_cursor;
     hasNext = saved.page_info?.has_next_page;
   }

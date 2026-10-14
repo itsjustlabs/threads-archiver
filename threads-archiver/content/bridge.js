@@ -96,8 +96,16 @@ async function handleGQL(body, friendlyName) {
     signal: AbortSignal.timeout(60_000),
   });
 
-  if (!res.ok) throw new Error(`HTTP ${res.status} from GraphQL`);
   const text = await res.text();
+  // Threads answers with an HTML page, not data, when the session is logged
+  // out, challenged ("confirm it's you") or rate-limited. Report the page
+  // title so the logs say which; the worker backs off on this marker.
+  if (/^\s*</.test(text) || res.status === 429) {
+    const title = (text.match(/<title[^>]*>([^<]{0,120})/i)?.[1] ?? '').trim() || '(no title)';
+    throw new Error(`THREADS_WEB_PAGE: Threads returned a web page instead of data ` +
+      `(HTTP ${res.status}, page title: "${title}")`);
+  }
+  if (!res.ok) throw new Error(`HTTP ${res.status} from GraphQL`);
   const json = JSON.parse(text.replace(/^for \(;;\);/, ''));
 
   // Log the top-level shape so you can see it in the Threads tab console

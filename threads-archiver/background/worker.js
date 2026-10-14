@@ -56,6 +56,11 @@ function scheduleAlarm() {
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== ALARM_NAME) return;
   if (await isPaused()) return; // respect an explicit pause — don't auto-resume
+  const { [BACKOFF_UNTIL_KEY]: until = 0 } = await chrome.storage.local.get(BACKOFF_UNTIL_KEY);
+  if (Date.now() < until) {
+    console.log(`[archiver] Scheduled sync skipped: backing off until ${new Date(until).toISOString().slice(11, 16)} UTC`);
+    return;
+  }
   // An interrupted full refresh takes priority over the regular sync
   if (await maybeResumeFullRefresh()) return;
   runSync();
@@ -167,6 +172,34 @@ const setPaused = v => chrome.storage.local.set({ [PAUSE_KEY]: v });
 
 // ── main sync ──────────────────────────────────────────────────────────────────
 
+// ── incremental scan + back-off state (chrome.storage.local) ─────────────────
+const LAST_FULL_SCAN_KEY = 'lastFullScanAt';
+const BACKOFF_UNTIL_KEY  = 'syncBackoffUntil';
+const BACKOFF_MS_KEY     = 'syncBackoffMs';
+const FULL_SCAN_EVERY_MS = 24 * 60 * 60_000;
+const BACKOFF_FIRST_MS   = 60 * 60_000;
+const BACKOFF_MAX_MS     = 8 * 60 * 60_000;
+
+async function fullScanDue() {
+  const { [LAST_FULL_SCAN_KEY]: last } = await chrome.storage.local.get(LAST_FULL_SCAN_KEY);
+  if (!last) {
+    // First run with this code: start the daily clock now rather than firing a
+    // ~96-request full scan straight away while Threads is already limiting us.
+    await chrome.storage.local.set({ [LAST_FULL_SCAN_KEY]: Date.now() });
+    return false;
+  }
+  return Date.now() - last > FULL_SCAN_EVERY_MS;
+}
+
+// 1h, then doubling up to 8h, until a sync succeeds again.
+async function startBackoff() {
+  const { [BACKOFF_MS_KEY]: prev } = await chrome.storage.local.get(BACKOFF_MS_KEY);
+  const ms = prev ? Math.min(prev * 2, BACKOFF_MAX_MS) : BACKOFF_FIRST_MS;
+  const until = Date.now() + ms;
+  await chrome.storage.local.set({ [BACKOFF_UNTIL_KEY]: until, [BACKOFF_MS_KEY]: ms });
+  return until;
+}
+
 let _syncing = false;
 let _syncStartedAt = 0;
 let _syncRun = 0;          // so a hung run finishing late can't clear a newer run's flag
@@ -209,10 +242,28 @@ async function runSync() {
     // ── 1. Fetch saved list ─────────────────────────────────────────────────
     await setSyncStatus('syncing', { message: 'Fetching saved posts…' });
 
+    // Incremental by default: the saved list is newest-first, so stop at the
+    // first page with nothing new. Re-reading all ~380 saved posts every
+    // 30 minutes (~96 requests) is what got the session rate-limited. A full
+    // scan still runs at most once a day, to catch anything saved out of order.
+    const fullScan = await fullScanDue();
     const allEdges = [];
-    await fetchAllSaved(async edges => { allEdges.push(...edges); });
+    let pages = 0;
+    await fetchAllSaved(async edges => {
+      pages++;
+      allEdges.push(...edges);
+      if (fullScan) return true;
+      for (const edge of edges) {
+        const node = edge.node ?? edge;
+        const code = (node?.thread_items?.[0]?.post ?? node)?.code;
+        if (code && !(await getThread(code))) return true;   // something new here: keep going
+      }
+      return false;
+    });
+    if (fullScan) await chrome.storage.local.set({ [LAST_FULL_SCAN_KEY]: Date.now() });
 
-    console.log(`[archiver] ${allEdges.length} saved edges fetched`);
+    console.log(`[archiver] ${allEdges.length} saved edges fetched ` +
+      `(${fullScan ? 'full scan' : 'incremental'}, ${pages} page(s))`);
 
     // ── 2. Detect new posts ─────────────────────────────────────────────────
     const newNodes = [];
@@ -266,6 +317,7 @@ async function runSync() {
       mediaBytes:  stats.mediaBytes,
     });
 
+    await chrome.storage.local.remove([BACKOFF_UNTIL_KEY, BACKOFF_MS_KEY]);
     console.log('[archiver] Sync complete');
 
   } catch (e) {
@@ -279,6 +331,15 @@ async function runSync() {
     } else if (e instanceof AuthError) {
       console.error('[archiver] Sync error:', e);
       await setSyncStatus('auth_error', { message: e.message });
+    } else if (/THREADS_WEB_PAGE/.test(e.message)) {
+      const until = await startBackoff();
+      console.warn(`[archiver] ${e.message}. Backing off: no scheduled sync until ` +
+        `${new Date(until).toISOString().slice(11, 16)} UTC`);
+      await setSyncStatus('error', {
+        message: e.message.replace('THREADS_WEB_PAGE: ', '') +
+          ` — scheduled syncs paused until ${new Date(until).toLocaleTimeString()}. ` +
+          `Check the Threads tab for a login or "confirm it's you" page.`,
+      });
     } else {
       console.error('[archiver] Sync error:', e);
       if (/BarcelonaSavedPageRefetchableQuery/.test(e.message)) {
