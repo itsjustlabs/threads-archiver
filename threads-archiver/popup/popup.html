@@ -72,6 +72,14 @@
       gap: 8px;
       min-height: 34px;
     }
+    /* One line only: long messages are cut with an ellipsis (full text on hover). */
+    #statusText {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .status-dot {
       width: 7px; height: 7px;
       border-radius: 50%;

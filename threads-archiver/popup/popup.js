@@ -114,6 +114,7 @@ async function refreshStatus() {
 // status updates to the text line until it expires.
 function holdStatus(msg, ms = 10000) {
   statusText.textContent = msg;
+  statusText.title = msg;
   _holdStatusUntil = Date.now() + ms;
 }
 
@@ -154,6 +155,7 @@ function applyStatus(s) {
         statusText.textContent = 'Not synced yet';
       }
   }
+  statusText.title = statusText.textContent;   // full text on hover
   if (s.threadCount != null) {
     statsText.textContent = `${s.threadCount} archived · ${formatBytes(s.mediaBytes ?? 0)}`;
   }

@@ -29,9 +29,11 @@ const DELTA_BATCH_SIZE  = 50;   // max post IDs per reply-count request
 
 // ── install / startup ──────────────────────────────────────────────────────────
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(details => {
   scheduleAlarm();
   setSyncStatus('idle');
+  // New code may handle whatever broke, so give it a chance.
+  if (details?.reason === 'update') clearCompatPause('extension updated');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -56,6 +58,11 @@ function scheduleAlarm() {
 chrome.alarms.onAlarm.addListener(async alarm => {
   if (alarm.name !== ALARM_NAME) return;
   if (await isPaused()) return; // respect an explicit pause — don't auto-resume
+  const { [COMPAT_PAUSE_KEY]: compatPaused } = await chrome.storage.local.get(COMPAT_PAUSE_KEY);
+  if (compatPaused) {
+    console.log('[archiver] Scheduled sync skipped: paused after repeated compatibility failures');
+    return;
+  }
   const { [BACKOFF_UNTIL_KEY]: until = 0 } = await chrome.storage.local.get(BACKOFF_UNTIL_KEY);
   if (Date.now() < until) {
     console.log(`[archiver] Scheduled sync skipped: backing off until ${new Date(until).toISOString().slice(11, 16)} UTC`);
@@ -93,6 +100,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     _pauseRequested = false;
     (async () => {
       await setPaused(false);
+      await clearCompatPause('resumed from the popup');
       // Resume whatever was in progress: a full-refresh queue takes priority.
       if (!(await maybeResumeFullRefresh())) runSync();
       sendResponse({ ok: true });
@@ -198,6 +206,61 @@ async function startBackoff() {
   const until = Date.now() + ms;
   await chrome.storage.local.set({ [BACKOFF_UNTIL_KEY]: until, [BACKOFF_MS_KEY]: ms });
   return until;
+}
+
+// ── compatibility auto-pause ─────────────────────────────────────────────────
+// When Threads changes in a way this version can't handle, every sync fails
+// the same way. After COMPAT_PAUSE_AFTER consecutive failures of that kind,
+// stop scheduled syncs instead of retrying every 30 minutes. Cleared by a
+// successful sync, by Resume / Sync now in the popup, or by an extension update.
+const COMPAT_FAILS_KEY   = 'compatFailures';
+const COMPAT_PAUSE_KEY   = 'compatPausedAt';
+const COMPAT_PAUSE_AFTER = 3;
+
+// Errors that mean "Threads no longer matches what this code expects", as
+// opposed to network trouble (retry), a web page (back off) or a logout.
+function isCompatError(e) {
+  return /GraphQL execution error|is not valid JSON|Unexpected token|Unknown query key|HTTP 4\d\d from GraphQL/.test(e?.message ?? '');
+}
+
+async function recordCompatFailure() {
+  const { [COMPAT_FAILS_KEY]: n = 0 } = await chrome.storage.local.get(COMPAT_FAILS_KEY);
+  await chrome.storage.local.set({ [COMPAT_FAILS_KEY]: n + 1 });
+  return n + 1;
+}
+
+async function clearCompatPause(why) {
+  const { [COMPAT_PAUSE_KEY]: paused } = await chrome.storage.local.get(COMPAT_PAUSE_KEY);
+  await chrome.storage.local.remove([COMPAT_FAILS_KEY, COMPAT_PAUSE_KEY]);
+  if (paused) console.log(`[archiver] Compatibility pause cleared (${why})`);
+}
+
+// The popup has one line for status. Keep it short; full details go to the log.
+function shortError(e) {
+  const m = e?.message ?? String(e);
+  if (/THREADS_WEB_PAGE/.test(m))            return 'Threads returned a page instead of data';
+  if (isCompatError(e))                      return 'Threads changed; this version can’t read it';
+  if (/timed out|no answer from the Threads tab|Bridge unreachable|Failed to fetch/.test(m))
+                                             return 'Network problem; will retry';
+  const first = m.split(/(?<=\.)\s/)[0];
+  return first.length > 90 ? first.slice(0, 87) + '…' : first;
+}
+
+// ── daily reload of the Threads tab ───────────────────────────────────────────
+// The /saved tab stays open between syncs (it's where live query IDs come from)
+// and, like any long-lived web app, slowly grows. Reload it once a day.
+const TAB_RELOAD_KEY      = 'threadsTabReloadedAt';
+const TAB_RELOAD_EVERY_MS = 24 * 60 * 60_000;
+
+async function maybeReloadThreadsTab(tabId) {
+  const { [TAB_RELOAD_KEY]: last } = await chrome.storage.local.get(TAB_RELOAD_KEY);
+  if (!last) { await chrome.storage.local.set({ [TAB_RELOAD_KEY]: Date.now() }); return tabId; }
+  if (Date.now() - last < TAB_RELOAD_EVERY_MS) return tabId;
+  console.log('[archiver] Reloading the Threads tab (daily, to release memory)');
+  await chrome.tabs.reload(tabId);
+  await chrome.storage.local.set({ [TAB_RELOAD_KEY]: Date.now() });
+  await new Promise(r => setTimeout(r, 750));   // let it leave the "complete" state first
+  return withTimeout(waitForTabLoad(tabId), 60_000, 'Reloading the Threads tab');
 }
 
 let _syncing = false;
@@ -318,6 +381,7 @@ async function runSync() {
     });
 
     await chrome.storage.local.remove([BACKOFF_UNTIL_KEY, BACKOFF_MS_KEY]);
+    await clearCompatPause('sync succeeded');
     console.log('[archiver] Sync complete');
 
   } catch (e) {
@@ -336,17 +400,27 @@ async function runSync() {
       console.warn(`[archiver] ${e.message}. Backing off: no scheduled sync until ` +
         `${new Date(until).toISOString().slice(11, 16)} UTC`);
       await setSyncStatus('error', {
-        message: e.message.replace('THREADS_WEB_PAGE: ', '') +
-          ` — scheduled syncs paused until ${new Date(until).toLocaleTimeString()}. ` +
-          `Check the Threads tab for a login or "confirm it's you" page.`,
+        message: `${shortError(e)}; retrying after ` +
+          new Date(until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
       });
-    } else {
-      console.error('[archiver] Sync error:', e);
+    } else if (isCompatError(e)) {
+      const n = await recordCompatFailure();
+      console.error(`[archiver] Sync error (compatibility, ${n}/${COMPAT_PAUSE_AFTER}): ` + e.message);
       if (/BarcelonaSavedPageRefetchableQuery/.test(e.message)) {
         await diagnosePagination().catch(err =>
           console.warn('[archiver] Pagination diagnostic failed: ' + err.message));
       }
-      await setSyncStatus('error', { message: e.message });
+      if (n >= COMPAT_PAUSE_AFTER) {
+        await chrome.storage.local.set({ [COMPAT_PAUSE_KEY]: Date.now() });
+        console.warn(`[archiver] Scheduled syncs paused after ${n} compatibility failures in a row. ` +
+          'They resume after an extension update, a successful "Sync now", or Resume.');
+        await setSyncStatus('paused', { message: 'Threads changed; syncing paused until an update' });
+      } else {
+        await setSyncStatus('error', { message: shortError(e) });
+      }
+    } else {
+      console.error('[archiver] Sync error: ' + e.message);
+      await setSyncStatus('error', { message: shortError(e) });
     }
   } finally {
     clearInterval(keepAlive);
@@ -365,7 +439,7 @@ async function runSync() {
  * can't be read (not logged in / page not loaded).
  */
 async function ensureBridgeReady() {
-  const tabId = await findOrCreateThreadsTab();
+  const tabId = await maybeReloadThreadsTab(await findOrCreateThreadsTab());
   await waitForBridge(tabId);
   setBridgeTab(tabId);
   console.log(`[archiver] Bridge ready on tab ${tabId}`);
