@@ -24,12 +24,6 @@ let _sort        = 'newest';
 let _onlyMissing = false;
 let _holdStatusUntil = 0; // suppress the status poller while a transient msg shows
 
-// ── init ───────────────────────────────────────────────────────────────────────
-
-await refreshStatus();
-await renderThreads();
-
-setInterval(refreshStatus, 4000);
 
 // ── search + sort controls ─────────────────────────────────────────────────────
 
@@ -375,3 +369,13 @@ function formatBytes(b) {
   if (b < 1073741824)  return `${(b / 1048576).toFixed(1)} MB`;
   return `${(b / 1073741824).toFixed(2)} GB`;
 }
+
+// ── init ───────────────────────────────────────────────────────────────────────
+// Last, and not awaited: every button handler above is attached first. With a
+// few hundred archived posts (some with thousands of stored replies),
+// renderThreads() takes a while, and awaiting it at the top of this module left
+// every button dead until it finished: clicks in that window were simply lost.
+
+refreshStatus();
+renderThreads().catch(e => console.error('[archiver popup] Failed to render threads: ' + e.message));
+setInterval(refreshStatus, 4000);
