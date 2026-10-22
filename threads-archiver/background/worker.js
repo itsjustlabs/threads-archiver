@@ -463,6 +463,7 @@ async function ensureBridgeReady() {
   const pageParams = await extractPageParams(tabId);
   console.log('[archiver] Page params: ' + JSON.stringify({
     lsd: pageParams.lsd ? pageParams.lsd.slice(0, 10) + '…' : '(empty)',
+    fb_dtsg: pageParams.fb_dtsg ? 'found' : '(not found)',
     __rev: pageParams.__rev,
     dsUserId: pageParams.dsUserId,
   }));
@@ -476,6 +477,7 @@ async function ensureBridgeReady() {
 
   setMetaParams({
     lsd:      pageParams.lsd,
+    fb_dtsg:  pageParams.fb_dtsg,
     __hs:     pageParams.__hs,
     __rev:    pageParams.__rev,
     __s:      pageParams.__s,
@@ -1698,6 +1700,8 @@ async function extractPageParams(tabId) {
       const siteMod   = safeReq('SiteData');
 
       const lsd   = safeGet(() => lsdMod?.token);
+      // The anti-forgery token the page sends with its own GraphQL requests.
+      const fbDtsg = safeGet(() => safeReq('DTSGInitialData')?.token);
       const __hs  = safeGet(() => siteMod?.haste_session);
       const __hsi = safeGet(() => siteMod?.hsi);
       const __rev = safeGet(() => siteMod?.client_revision ?? siteMod?.clientRevision);
@@ -1745,6 +1749,7 @@ async function extractPageParams(tabId) {
 
       return {
         lsd:      lsd   || ex(/"LSD",\[\],\{"token":"([^"]+)"/),
+        fb_dtsg:  fbDtsg || ex(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/),
         __hs:     __hs  || ex(/"haste_session":"([^"]+)"/),
         __rev:    __rev || ex(/"client_revision":(\d+)/),
         __s:      __s   || ex(/"session_id":"([^"]+)"/),

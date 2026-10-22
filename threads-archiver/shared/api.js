@@ -180,6 +180,13 @@ export async function gqlQuery(queryKey, variables = {}) {
     av:        meta._dsUserId,
     __user:    meta._dsUserId,
   });
+  // Since Oct 21 Threads answers "ok" with empty data unless the request carries
+  // the page's fb_dtsg token, as the page's own requests do. jazoest is the
+  // checksum the page sends with it: "2" + the sum of the token's char codes.
+  if (meta.fb_dtsg) {
+    body.set('fb_dtsg', meta.fb_dtsg);
+    body.set('jazoest', '2' + [...meta.fb_dtsg].reduce((n, c) => n + c.charCodeAt(0), 0));
+  }
 
   _lastRequest = {
     name:      q.name,
