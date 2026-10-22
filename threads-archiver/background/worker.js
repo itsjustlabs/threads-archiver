@@ -11,7 +11,7 @@
  */
 
 import {
-  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest, getLastBody,
+  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest, getLastBody, getActorSource,
   downloadMedia, normalizePost, AuthError, QUERY_DEFS, codeToPk,
   extractImages, extractVideos,
 } from '../shared/api.js';
@@ -393,6 +393,7 @@ async function runSync() {
 
     await chrome.storage.local.remove([BACKOFF_UNTIL_KEY, BACKOFF_MS_KEY]);
     await clearCompatPause('sync succeeded');
+    if (getActorSource()) await chrome.storage.local.set({ [ACTOR_SOURCE_KEY]: getActorSource() });
     console.log('[archiver] Sync complete');
 
   } catch (e) {
@@ -449,6 +450,19 @@ async function runSync() {
   }
 }
 
+// ── which account ID to send ──────────────────────────────────────────────────
+// fetchAllSaved tries the page's account IDs in this order until one returns
+// the saved list; the source that worked goes first next time. Sources (names)
+// are logged and stored, never the IDs.
+const ACTOR_SOURCE_KEY = 'actorSource';
+
+async function orderActorCandidates(candidates) {
+  const { [ACTOR_SOURCE_KEY]: preferred } = await chrome.storage.local.get(ACTOR_SOURCE_KEY);
+  const entries = Object.entries(candidates);
+  entries.sort(([a], [b]) => (b === preferred) - (a === preferred));
+  return entries;
+}
+
 // ── bridge preparation (shared by full sync and single-thread refresh) ────────
 
 /**
@@ -488,8 +502,11 @@ async function ensureBridgeReady() {
     __dyn:    pageParams.__dyn,
     __csr:    pageParams.__csr,
     _dsUserId: pageParams.dsUserId,
+    actorCandidates: await orderActorCandidates(pageParams.actorCandidates ?? {}),
     queries:   dynQueries,
   });
+  console.log('[archiver] Account ID sources, in the order tried: ' +
+    JSON.stringify(Object.keys(pageParams.actorCandidates ?? {})) + `; first: ${getActorSource()}`);
   return tabId;
 }
 
@@ -1598,6 +1615,7 @@ async function diagnosePagination() {
             ourUrlPath:  new URL(OUR_URL).pathname,
             jazoestFormulaMatchesPage: pageP.get('jazoest') === '2' + [...dtsg].reduce((n, c) => n + c.charCodeAt(0), 0),
             fieldsWithDifferentValues: [...ourP.keys()].filter(k => pageP.has(k) && pageP.get(k) !== ourP.get(k)).sort(),
+            pageAvEqualsPageUser: pageP.get('av') === pageP.get('__user'),
           };
         }
         for (const c of captured) delete c._raw;   // nothing with token values leaves the page
@@ -1708,6 +1726,26 @@ async function extractPageParams(tabId) {
 
       const csrfToken = (document.cookie.match(/csrftoken=([^;]+)/) ?? [])[1] ?? '';
 
+      // The account ID requests are made as (av / __user). Since Oct 21 the
+      // page no longer sends the ds_user_id cookie's ID, and a request made as
+      // that ID gets empty data. Collect every ID the page knows, by source.
+      const cu  = safeReq('CurrentUserInitialData') ?? {};
+      const cuM = safeReq('CurrentUser');
+      const actorCandidates = {};
+      for (const [name, get] of [
+        ['CurrentUserInitialData.ACCOUNT_ID',           () => cu.ACCOUNT_ID],
+        ['CurrentUserInitialData.USER_ID',              () => cu.USER_ID],
+        ['CurrentUserInitialData.NON_FACEBOOK_USER_ID', () => cu.NON_FACEBOOK_USER_ID],
+        ['CurrentUserInitialData.IG_USER_EIMU',         () => cu.IG_USER_EIMU],
+        ['CurrentUser.getID',                           () => cuM?.getID?.()],
+        ['CurrentUser.getAccountID',                    () => cuM?.getAccountID?.()],
+        ['CurrentUser.getPossiblyNonFacebookUserID',    () => cuM?.getPossiblyNonFacebookUserID?.()],
+        ['ds_user_id cookie',                           () => dsUserId],
+      ]) {
+        const v = safeGet(get);
+        if (v && v !== '0' && !Object.values(actorCandidates).includes(v)) actorCandidates[name] = v;
+      }
+
       // Extract live doc_ids + provider variable values from Relay modules.
       // Only modules loaded on the current page resolve; missing ones fall
       // back to the snapshot in shared/api.js.
@@ -1750,6 +1788,7 @@ async function extractPageParams(tabId) {
         __dyn:    ex(/"dynamic_js_bundle":"([^"]+)"/),
         __csr:    ex(/"client_sr_version":"([^"]+)"/),
         dsUserId,
+        actorCandidates,
         csrfToken,
         queries,
       };

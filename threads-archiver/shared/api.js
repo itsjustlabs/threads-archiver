@@ -108,7 +108,13 @@ export function setBridgeTab(tabId) {
 /** Called by worker.js with params extracted from the page's MAIN world. */
 export function setMetaParams(params) {
   _metaCache = params;
+  const [first] = params?.actorCandidates ?? [];
+  if (first) { _metaCache._actor = first[1]; _actorSource = first[0]; }
 }
+
+// Source name (never the value) of the account ID the last sync succeeded with.
+let _actorSource = null;
+export function getActorSource() { return _actorSource; }
 
 export class AuthError extends Error {
   constructor(msg) { super(msg); this.name = 'AuthError'; }
@@ -181,8 +187,8 @@ export async function gqlQuery(queryKey, variables = {}) {
     __hsi:     meta.__hsi  ?? '',
     __dyn:     meta.__dyn  ?? '',
     __csr:     meta.__csr  ?? '',
-    av:        meta._dsUserId,
-    __user:    meta._dsUserId,
+    av:        meta._actor ?? meta._dsUserId,
+    __user:    meta._actor ?? meta._dsUserId,
   });
   // Since Oct 21 Threads answers "ok" with empty data unless the request carries
   // the page's fb_dtsg token, as the page's own requests do. jazoest is the
@@ -245,6 +251,27 @@ export async function fetchAllSaved(onPage) {
   // Viewer query takes NO plain variables — provider flags only.
   let json  = await gqlQuery('SAVED_VIEWER');
   let saved = json?.data?.xdt_text_app_viewer?.saved_media;
+  // An empty answer means the request was made as an account ID Threads no
+  // longer accepts here; try the page's other IDs, one request each.
+  if (!saved) {
+    for (const [source, id] of (_metaCache?.actorCandidates ?? []).slice(1)) {
+      _metaCache._actor = id;
+      json  = await gqlQuery('SAVED_VIEWER');
+      saved = json?.data?.xdt_text_app_viewer?.saved_media;
+      if (saved) {
+        console.log(`[archiver] Saved list returned when sending the account ID from ${source}`);
+        _actorSource = source;
+        break;
+      }
+      await new Promise(r => setTimeout(r, SAVED_PAGE_DELAY_MS));
+    }
+    if (!saved) {
+      const first = _metaCache?.actorCandidates?.[0];
+      if (first) { _metaCache._actor = first[1]; _actorSource = first[0]; }
+      console.log('[archiver] No account ID source returned the saved list: ' +
+        JSON.stringify((_metaCache?.actorCandidates ?? []).map(([n]) => n)));
+    }
+  }
   // A logged-out session gets xdt_text_app_viewer: null (AuthError above). On
   // Oct 21 the viewer query started answering "ok" with empty data while the
   // /saved page itself still worked, so ask for the first page with the
