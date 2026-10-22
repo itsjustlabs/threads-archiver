@@ -422,8 +422,10 @@ async function runSync() {
           console.warn('[archiver] Pagination diagnostic failed: ' + err.message));
       }
       if (/no saved posts for SAVED_VIEWER/.test(e.message)) {
-        await describeSavedQuery().catch(err =>
-          console.warn('[archiver] Saved-query diagnostic failed: ' + err.message));
+        // The last request sent was our SAVED_REFETCH fallback, so this compares
+        // it with the page's own pagination request and replays the page's.
+        await diagnosePagination().catch(err =>
+          console.warn('[archiver] Pagination diagnostic failed: ' + err.message));
       }
       if (n >= COMPAT_PAUSE_AFTER) {
         await chrome.storage.local.set({ [COMPAT_PAUSE_KEY]: Date.now() });
@@ -1568,7 +1570,7 @@ async function diagnosePagination() {
               : ok._raw.headers;
             const r = await send(params.toString(), headers);
             replays.push({ variant: label, status: r.status, errorCount: r.errorCount ?? null,
-                           error: r.errors?.[0] ?? r.unparsable ?? null });
+                           error: r.errors?.[0] ?? r.unparsable ?? null, dataKeys: r.dataKeys });
             await new Promise(res => setTimeout(res, 800));   // don't hammer Threads
           }
         }
@@ -1587,7 +1589,8 @@ async function diagnosePagination() {
   const union = key => [...new Set(list.flatMap(c => key(c)))].sort();
   const summary = {
     tabVisibility: captured?.visibility,
-    pageRequests: list.map(c => `${c.req.name} -> ${c.status ?? 'pending'}${c.res?.errorCount ? ` (${c.res.errorCount} errors)` : ''}`),
+    pageRequests: list.map(c => `${c.req.name} -> ${c.status ?? 'pending'}${c.res?.errorCount ? ` (${c.res.errorCount} errors)` : ''}` +
+      ` data keys ${JSON.stringify(c.res?.dataKeys ?? null)}`),
     formFieldsPageOnly: union(c => c.req.formKeys).filter(k => !ourForm.includes(k)),
     formFieldsOursOnly: ourForm.filter(k => !union(c => c.req.formKeys).includes(k)),
     headersPageOnly: union(c => c.headers ?? []).filter(h => !OUR_HEADERS.includes(h)),
@@ -1613,52 +1616,6 @@ async function diagnosePagination() {
   summary.replays = captured?.replays?.length ? captured.replays
     : 'no successful page pagination request to replay';
   console.log('[archiver] Page\'s own requests vs ours: ' + JSON.stringify(summary));
-}
-
-// ── saved-query diagnostic (temporary) ─────────────────────────────────────────
-// The viewer query has answered "ok" with empty data since Oct 21, with no
-// errors, while the /saved page still shows the list. A root field that is
-// simply absent usually means it sits behind an @include/@skip condition, so
-// log the live query's top levels and the values of any condition variables.
-
-async function describeSavedQuery() {
-  const tabId = await findOrCreateThreadsTab();
-  const modules = [QUERY_DEFS.SAVED_VIEWER.module, QUERY_DEFS.SAVED_REFETCH.module];
-  const [{ result } = {}] = await chrome.scripting.executeScript({
-    target: { tabId },
-    world:  'MAIN',
-    args:   [modules],
-    func:   (modules) => {
-      const out = {};
-      for (const name of modules) {
-        try {
-          const mod = require(name);
-          const req = mod?.default ?? mod;
-          const conditions = new Set();
-          const walk = (sels, depth) => (sels ?? []).map(sel => {
-            const o = { kind: sel.kind };
-            if (sel.name) o.name = sel.name;
-            if (sel.condition) { o.if = sel.condition; o.passingValue = sel.passingValue; conditions.add(sel.condition); }
-            if (sel.args?.length) o.args = sel.args.map(a => a.name);
-            if (sel.selections) o.sel = depth < 2 ? walk(sel.selections, depth + 1) : `${sel.selections.length} more`;
-            return o;
-          });
-          const root = walk(req.operation?.selections, 0);
-          const provided = req.params?.providedVariables ?? {};
-          const values = {};
-          for (const c of conditions) {
-            try { values[c] = typeof provided[c]?.get === 'function' ? provided[c].get() : (c in provided ? provided[c] : 'not provided'); }
-            catch (e) { values[c] = 'get() threw: ' + String(e).slice(0, 60); }
-          }
-          out[req.params?.name ?? name] = { docId: req.params?.id, root, conditionValues: values };
-        } catch (e) {
-          out[name] = 'unavailable: ' + String(e).slice(0, 80);
-        }
-      }
-      return out;
-    },
-  });
-  console.log('[archiver] Saved-query shape: ' + JSON.stringify(result).slice(0, 3000));
 }
 
 // ── page param extraction (MAIN world) ────────────────────────────────────────
