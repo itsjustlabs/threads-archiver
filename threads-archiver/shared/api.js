@@ -233,11 +233,20 @@ export async function fetchAllSaved(onPage) {
   // Viewer query takes NO plain variables — provider flags only.
   let json  = await gqlQuery('SAVED_VIEWER');
   let saved = json?.data?.xdt_text_app_viewer?.saved_media;
-  // A logged-out session gets xdt_text_app_viewer: null (AuthError above). An
-  // "ok" answer without the saved list means the query itself changed.
+  // A logged-out session gets xdt_text_app_viewer: null (AuthError above). On
+  // Oct 21 the viewer query started answering "ok" with empty data while the
+  // /saved page itself still worked, so ask for the first page with the
+  // pagination query instead, which takes the same page size and no cursor.
   if (!saved) {
-    throw new Error('GraphQL returned no saved posts for SAVED_VIEWER ' +
-      `(data keys: ${JSON.stringify(Object.keys(json?.data ?? {}))})`);
+    const viewerKeys = JSON.stringify(Object.keys(json?.data ?? {}));
+    json  = await gqlQuery('SAVED_REFETCH', { first: SAVED_PAGE_SIZE, after: null });
+    saved = json?.data?.xdt_text_app_viewer?.saved_media;
+    if (!saved) {
+      throw new Error('GraphQL returned no saved posts for SAVED_VIEWER ' +
+        `(data keys: ${viewerKeys}) or SAVED_REFETCH (data keys: ${JSON.stringify(Object.keys(json?.data ?? {}))})`);
+    }
+    console.log(`[archiver] SAVED_VIEWER returned no saved list (data keys: ${viewerKeys}); ` +
+      'fetched the first page with SAVED_REFETCH instead');
   }
 
   // onPage returns false to stop early (incremental sync: nothing new here).
