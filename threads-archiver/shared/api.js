@@ -95,6 +95,10 @@ let _metaCache   = null;
 // GraphQL variables.
 let _lastRequest = null;
 export function getLastRequest() { return _lastRequest; }
+// The full body of that request, for the diagnostic to replay inside the
+// Threads page. Holds session tokens: never log it.
+let _lastBody = null;
+export function getLastBody() { return _lastBody; }
 
 export function setBridgeTab(tabId) {
   _bridgeTabId = tabId;
@@ -194,6 +198,7 @@ export async function gqlQuery(queryKey, variables = {}) {
     formKeys:  [...body.keys()].sort(),
     variables: { ...variables, ...q.providers },
   };
+  _lastBody = body.toString();
 
   const res  = await sendBridge({ type: 'BRIDGE_GQL', body: body.toString(), friendlyName: q.name });
   const json = res.json;

@@ -11,7 +11,7 @@
  */
 
 import {
-  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest,
+  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest, getLastBody,
   downloadMedia, normalizePost, AuthError, QUERY_DEFS, codeToPk,
   extractImages, extractVideos,
 } from '../shared/api.js';
@@ -1456,8 +1456,8 @@ async function diagnosePagination() {
     [{ result: captured } = {}] = await chrome.scripting.executeScript({
       target: { tabId },
       world:  'MAIN',
-      args:   [ours?.name ?? 'BarcelonaSavedPageRefetchableQuery'],
-      func:   async (wantName) => {
+      args:   [ours?.name ?? 'BarcelonaSavedPageRefetchableQuery', getLastBody()],
+      func:   async (wantName, ourBody) => {
         // Capture every GraphQL request the page makes: field and header names
         // always, variables only for the query we care about.
         const captured = [];
@@ -1550,9 +1550,9 @@ async function diagnosePagination() {
         const ok = captured.find(c => c.req.name === wantName && c._raw && c.status === 200 && !c.res?.errorCount);
         if (ok) {
           const OUR_HEADERS = ['accept', 'content-type', 'x-csrftoken', 'x-fb-friendly-name', 'x-fb-lsd', 'x-ig-app-id'];
-          const send = (body, headers) => new Promise(resolve => {
+          const send = (body, headers, url = ok._raw.url) => new Promise(resolve => {
             const x = new XMLHttpRequest();
-            x.open(ok._raw.method, ok._raw.url);
+            x.open(ok._raw.method, url);
             for (const [k, v] of headers) x.setRequestHeader(k, v);
             x.onload = () => resolve({ status: x.status, ...parseResponse(x.responseText) });
             x.onerror = () => resolve({ status: 'network error' });
@@ -1574,9 +1574,32 @@ async function diagnosePagination() {
                            error: r.errors?.[0] ?? r.unparsable ?? null, dataKeys: r.dataKeys });
             await new Promise(res => setTimeout(res, 800));   // don't hammer Threads
           }
+          // Our request, sent the page's way, and the page's sent ours: which
+          // side of the difference is in the body and which in the transport.
+          const OUR_URL = 'https://www.threads.com/graphql/query';
+          const extra = {};
+          if (ourBody) extra['E our body, page URL + headers'] = () => send(ourBody, ok._raw.headers);
+          extra['F page body, our URL + headers'] = () =>
+            send(ok._raw.body, ok._raw.headers.filter(([k]) => OUR_HEADERS.includes(k.toLowerCase())), OUR_URL);
+          for (const [label, run] of Object.entries(extra)) {
+            const r = await run();
+            replays.push({ variant: label, status: r.status, errorCount: r.errorCount ?? null,
+                           error: r.errors?.[0] ?? r.unparsable ?? null, dataKeys: r.dataKeys });
+            await new Promise(res => setTimeout(res, 800));
+          }
+          // Names only: which shared form fields carry different values.
+          const pageP = new URLSearchParams(ok._raw.body), ourP = new URLSearchParams(ourBody ?? '');
+          const dtsg = pageP.get('fb_dtsg') ?? '';
+          var transport = {
+            pageUrlPath: new URL(ok._raw.url, location.href).pathname,
+            ourUrlPath:  new URL(OUR_URL).pathname,
+            jazoestFormulaMatchesPage: pageP.get('jazoest') === '2' + [...dtsg].reduce((n, c) => n + c.charCodeAt(0), 0),
+            fieldsWithDifferentValues: [...ourP.keys()].filter(k => pageP.has(k) && pageP.get(k) !== ourP.get(k)).sort(),
+          };
         }
         for (const c of captured) delete c._raw;   // nothing with token values leaves the page
-        return { visibility: document.visibilityState, captured: captured.slice(0, 12), replays };
+        return { visibility: document.visibilityState, captured: captured.slice(0, 12), replays,
+                 transport: typeof transport === 'undefined' ? null : transport };
       },
     });
   } finally {
@@ -1614,6 +1637,7 @@ async function diagnosePagination() {
   } else {
     summary.pagination = 'page did not paginate during the experiment';
   }
+  summary.transport = captured?.transport;
   summary.replays = captured?.replays?.length ? captured.replays
     : 'no successful page pagination request to replay';
   console.log('[archiver] Page\'s own requests vs ours: ' + JSON.stringify(summary));
