@@ -244,6 +244,9 @@
     .setting-progress { height: 4px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 10px; }
     .setting-progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
     .setting-status { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
+    .setting-check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 10px; cursor: pointer; }
+    .setting-report { font-size: 12px; line-height: 1.5; margin-top: 8px; overflow-wrap: anywhere; }
+    .setting-report .when { color: var(--muted); }
 
     .setting-version {
       padding-top: 14px; border-top: 1px solid var(--border);
@@ -295,6 +298,14 @@
         <input type="file" id="importFile" accept=".zip,.json,application/zip,application/json" style="display:none">
         <div class="setting-progress" id="importProgress" style="display:none"><div class="setting-progress-fill" id="importProgressFill"></div></div>
         <div class="setting-status" id="backupStatus"></div>
+      </div>
+
+      <div class="setting">
+        <div class="setting-label">Diagnostics</div>
+        <div class="setting-desc">When Threads changes and syncing fails, compare the archiver's request with the Threads page's own, one difference at a time, to find what Threads no longer accepts. Automatic runs happen at most once a day per Threads update. Only field names are kept, never values.</div>
+        <label class="setting-check"><input type="checkbox" id="diagAuto"> Run automatically when syncing fails</label>
+        <button class="setting-btn" id="diagRunBtn">Run diagnostics now</button>
+        <div class="setting-report" id="diagReport"></div>
       </div>
 
       <div class="setting-version" id="settingsVersion"></div>

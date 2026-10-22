@@ -30,10 +30,44 @@ const _observer = new IntersectionObserver(entries => {
   }
 }, { rootMargin: '400px' });
 
-await render();
+// Settings first: render() can take a while on a large archive, and the gear
+// button must work meanwhile.
 setupSettings();
+await render();
 
 // ── settings / backup modal ────────────────────────────────────────────────────
+
+function setupDiagnostics() {
+  const auto   = document.getElementById('diagAuto');
+  const runBtn = document.getElementById('diagRunBtn');
+  const out    = document.getElementById('diagReport');
+  const send   = msg => new Promise(resolve => chrome.runtime.sendMessage(msg, resolve));
+
+  const show = report => {
+    out.textContent = '';
+    if (!report) return;
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = `${new Date(report.at).toLocaleString()} (${report.trigger}): `;
+    out.append(when, report.summary);
+    if (report.harmless?.length) {
+      out.append(document.createElement('br'), `Differences that don't matter: ${report.harmless.join(', ')}`);
+    }
+  };
+
+  send({ type: 'GET_DIAGNOSTICS' }).then(d => {
+    auto.checked = (d?.mode ?? 'auto') !== 'off';
+    show(d?.reports?.[0]);
+  });
+  auto.addEventListener('change', () => send({ type: 'SET_DIAGNOSTICS_MODE', mode: auto.checked ? 'auto' : 'off' }));
+  runBtn.addEventListener('click', async () => {
+    runBtn.disabled = true;
+    out.textContent = 'Running — the Threads tab comes forward briefly and scrolls…';
+    const r = await send({ type: 'RUN_DIAGNOSTICS' });
+    runBtn.disabled = false;
+    if (r?.ok) show(r.report); else out.textContent = `Couldn't run: ${r?.error ?? 'no answer from the extension'}`;
+  });
+}
 
 function setupSettings() {
   const modal      = document.getElementById('settingsModal');
@@ -54,6 +88,8 @@ function setupSettings() {
   closeBtn.addEventListener('click', close);
   modal.addEventListener('click', e => { if (e.target === modal) close(); });
   if (location.hash === '#settings') open(); // popup deep-links here
+
+  setupDiagnostics();
 
   // Export
   exportBtn.addEventListener('click', async () => {

@@ -11,11 +11,12 @@
  */
 
 import {
-  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest, getLastBody, getActorSource,
+  setBridgeTab, setMetaParams, fetchAllSaved, fetchThreadDetail, fetchCounts, getLastRequest, buildBody, SAVED_PAGE_SIZE,
   downloadMedia, normalizePost, AuthError, QUERY_DEFS, codeToPk,
   extractImages, extractVideos,
 } from '../shared/api.js';
 
+import { runCompatProbe, autoProbeDue, getReports, DIAG_MODE_KEY } from './compat-probe.js';
 import {
   getThread, putThread, getAllThreads,
   putMedia, getMedia, getMediaForPost, getStorageStats, getAllMediaIds,
@@ -128,6 +129,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch(e => sendResponse({ ok: false, error: e.message, authError: e instanceof AuthError }));
     return true;
   }
+  if (msg.type === 'RUN_DIAGNOSTICS') {
+    runDiagnostics()
+      .then(report => sendResponse({ ok: true, report }))
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+
+  if (msg.type === 'GET_DIAGNOSTICS') {
+    Promise.all([chrome.storage.local.get(DIAG_MODE_KEY), getReports()])
+      .then(([m, reports]) => sendResponse({ mode: m[DIAG_MODE_KEY] ?? 'auto', reports }));
+    return true;
+  }
+
+  if (msg.type === 'SET_DIAGNOSTICS_MODE') {
+    chrome.storage.local.set({ [DIAG_MODE_KEY]: msg.mode === 'off' ? 'off' : 'auto' })
+      .then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
   if (msg.type === 'GET_STATUS') {
     getSyncStatus().then(s => sendResponse(s));
     return true;
@@ -234,6 +254,15 @@ async function clearCompatPause(why) {
   const { [COMPAT_PAUSE_KEY]: paused } = await chrome.storage.local.get(COMPAT_PAUSE_KEY);
   await chrome.storage.local.remove([COMPAT_FAILS_KEY, COMPAT_PAUSE_KEY]);
   if (paused) console.log(`[archiver] Compatibility pause cleared (${why})`);
+}
+
+// Compare our saved-posts request with the page's own, field by field (see
+// compat-probe.js). Ours is built for the same pagination query the page
+// sends on scroll, so the two differ only where Threads and we disagree.
+async function probeSavedPosts(trigger) {
+  const tabId = await findOrCreateThreadsTab();
+  const ourBody = await buildBody('SAVED_REFETCH', { first: SAVED_PAGE_SIZE, after: null });
+  return runCompatProbe({ tabId, queryName: 'BarcelonaSavedPageRefetchableQuery', ourBody, trigger, rev: _pageRev });
 }
 
 // The popup has one line for status. Keep it short; full details go to the log.
@@ -393,7 +422,6 @@ async function runSync() {
 
     await chrome.storage.local.remove([BACKOFF_UNTIL_KEY, BACKOFF_MS_KEY]);
     await clearCompatPause('sync succeeded');
-    if (getActorSource()) await chrome.storage.local.set({ [ACTOR_SOURCE_KEY]: getActorSource() });
     console.log('[archiver] Sync complete');
 
   } catch (e) {
@@ -418,23 +446,18 @@ async function runSync() {
     } else if (isCompatError(e)) {
       const n = await recordCompatFailure();
       console.error(`[archiver] Sync error (compatibility, ${n}/${COMPAT_PAUSE_AFTER}): ` + e.message);
-      if (/BarcelonaSavedPageRefetchableQuery/.test(e.message)) {
-        await diagnosePagination().catch(err =>
-          console.warn('[archiver] Pagination diagnostic failed: ' + err.message));
-      }
-      if (/no saved posts for SAVED_VIEWER/.test(e.message)) {
-        // The last request sent was our SAVED_REFETCH fallback, so this compares
-        // it with the page's own pagination request and replays the page's.
-        await diagnosePagination().catch(err =>
-          console.warn('[archiver] Pagination diagnostic failed: ' + err.message));
-      }
+      const probe = await (async () => {
+        if (!(await autoProbeDue(_pageRev))) return null;
+        return probeSavedPosts('auto');
+      })().catch(err => { console.warn('[archiver] Compatibility probe failed: ' + err.message); return null; });
       if (n >= COMPAT_PAUSE_AFTER) {
         await chrome.storage.local.set({ [COMPAT_PAUSE_KEY]: Date.now() });
         console.warn(`[archiver] Scheduled syncs paused after ${n} compatibility failures in a row. ` +
           'They resume after an extension update, a successful "Sync now", or Resume.');
-        await setSyncStatus('paused', { message: 'Threads changed; syncing paused until an update' });
+        await setSyncStatus('paused', { message: probe?.summary
+          ? `Paused: ${probe.summary}` : 'Threads changed; syncing paused until an update' });
       } else {
-        await setSyncStatus('error', { message: shortError(e) });
+        await setSyncStatus('error', { message: probe?.summary ?? shortError(e) });
       }
     } else {
       console.error('[archiver] Sync error: ' + e.message);
@@ -450,18 +473,9 @@ async function runSync() {
   }
 }
 
-// ── which account ID to send ──────────────────────────────────────────────────
-// fetchAllSaved tries the page's account IDs in this order until one returns
-// the saved list; the source that worked goes first next time. Sources (names)
-// are logged and stored, never the IDs.
-const ACTOR_SOURCE_KEY = 'actorSource';
-
-async function orderActorCandidates(candidates) {
-  const { [ACTOR_SOURCE_KEY]: preferred } = await chrome.storage.local.get(ACTOR_SOURCE_KEY);
-  const entries = Object.entries(candidates);
-  entries.sort(([a], [b]) => (b === preferred) - (a === preferred));
-  return entries;
-}
+// Threads' client build of the page the last sync used, for the probe's
+// once-per-build limit.
+let _pageRev = null;
 
 // ── bridge preparation (shared by full sync and single-thread refresh) ────────
 
@@ -479,8 +493,7 @@ async function ensureBridgeReady() {
   const pageParams = await extractPageParams(tabId);
   console.log('[archiver] Page params: ' + JSON.stringify({
     lsd: pageParams.lsd ? pageParams.lsd.slice(0, 10) + '…' : '(empty)',
-    fb_dtsg: pageParams.fb_dtsg ? `from ${pageParams.fbDtsgSource}` : '(not found)',
-    fbDtsgInitialIsCurrent: pageParams.fbDtsgInitialIsCurrent,
+    fb_dtsg: pageParams.fb_dtsg ? 'found' : '(not found)',
     __rev: pageParams.__rev,
     dsUserId: pageParams.dsUserId,
   }));
@@ -502,12 +515,29 @@ async function ensureBridgeReady() {
     __dyn:    pageParams.__dyn,
     __csr:    pageParams.__csr,
     _dsUserId: pageParams.dsUserId,
-    actorCandidates: await orderActorCandidates(pageParams.actorCandidates ?? {}),
+    asyncParams: pageParams.asyncParams,
+    av:        pageParams.av,
     queries:   dynQueries,
   });
-  console.log('[archiver] Account ID sources, in the order tried: ' +
-    JSON.stringify(Object.keys(pageParams.actorCandidates ?? {})) + `; first: ${getActorSource()}`);
+  _pageRev = pageParams.__rev;
+  console.log('[archiver] Request fields: ' + (pageParams.asyncParams
+    ? `from the page's builder (${Object.keys(pageParams.asyncParams).length} fields)`
+    : 'hand-built fallback (the page\'s builder was not readable)'));
   return tabId;
+}
+
+// ── on-demand compatibility probe (Backup & settings) ─────────────────────────
+
+async function runDiagnostics() {
+  if (_syncing) throw new Error('A sync is running — try again when it finishes.');
+  _syncing = true;
+  try {
+    await ensureBridgeReady();
+    return await probeSavedPosts('manual');
+  } finally {
+    _syncing = false;
+    await releaseThreadsTabs();
+  }
 }
 
 // ── single-thread refresh (from reader UI) ─────────────────────────────────────
@@ -1450,230 +1480,6 @@ function guessMime(url, fallback) {
 // extractImages / extractVideos are imported from shared/api.js — a video's
 // image_versions2 is its poster frame, attached as videos[].posterUrl.
 
-// ── pagination diagnostic (temporary) ─────────────────────────────────────────
-// Our next-page query fails with a bare "execution error" even though its
-// doc_id and variable names match the live page. To find the difference, let
-// the /saved page paginate by itself, capture that request, and compare it with
-// ours. Logs a single line; values that could be sensitive are summarised.
-
-async function diagnosePagination() {
-  const ours  = getLastRequest();
-  const tabId = await findOrCreateThreadsTab();
-
-  // Hidden tabs skip rendering, so the page's infinite-scroll observer never
-  // fires there. Bring the tab to the front for the experiment, then put back
-  // whatever was in front before.
-  const tab = await chrome.tabs.get(tabId);
-  const [prev] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-  await chrome.tabs.update(tabId, { active: true });
-  await new Promise(r => setTimeout(r, 1500));
-
-  let captured;
-  try {
-    [{ result: captured } = {}] = await chrome.scripting.executeScript({
-      target: { tabId },
-      world:  'MAIN',
-      args:   [ours?.name ?? 'BarcelonaSavedPageRefetchableQuery', getLastBody()],
-      func:   async (wantName, ourBody) => {
-        // Capture every GraphQL request the page makes: field and header names
-        // always, variables only for the query we care about.
-        const captured = [];
-        const headerNames = new WeakMap();
-        const headerPairs = new WeakMap();   // values stay in the page; never returned
-        const urlOf = new WeakMap();
-        const parseBody = (body) => {
-          try {
-            const p = new URLSearchParams(
-              (body instanceof FormData || body instanceof URLSearchParams || typeof body === 'string') ? body : '');
-            const name = p.get('fb_api_req_friendly_name');
-            if (!name) return null;
-            let variables;
-            if (name === wantName) { try { variables = JSON.parse(p.get('variables') || '{}'); } catch {} }
-            return { name, docId: p.get('doc_id'), formKeys: [...p.keys()].sort(), variables };
-          } catch { return null; }
-        };
-        const parseResponse = (text) => {
-          try {
-            const j = JSON.parse(String(text).replace(/^for \(;;\);/, ''));
-            return { errors: (j.errors ?? []).slice(0, 2).map(e => e?.message ?? e),
-                     errorCount: (j.errors ?? []).length,
-                     dataKeys: Object.keys(j.data ?? {}) };
-          } catch (e) { return { unparsable: String(e).slice(0, 80) }; }
-        };
-        const origSend = XMLHttpRequest.prototype.send;
-        const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-        const origFetch = window.fetch;
-        const origOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function (method, url) {
-          urlOf.set(this, { method, url: String(url) });
-          return origOpen.apply(this, arguments);
-        };
-        XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
-          const list = headerNames.get(this) ?? [];
-          list.push(String(k).toLowerCase()); headerNames.set(this, list);
-          const pairs = headerPairs.get(this) ?? [];
-          pairs.push([String(k), String(v)]); headerPairs.set(this, pairs);
-          return origSetHeader.apply(this, arguments);
-        };
-        XMLHttpRequest.prototype.send = function (body) {
-          const req = parseBody(body);
-          if (req) {
-            const entry = { via: 'xhr', req, headers: (headerNames.get(this) ?? []).sort() };
-            if (req.name === wantName) {
-              const rawBody = (body instanceof FormData || body instanceof URLSearchParams)
-                ? new URLSearchParams(body).toString() : String(body);
-              entry._raw = { ...(urlOf.get(this) ?? { method: 'POST', url: '/graphql/query' }), body: rawBody,
-                             headers: headerPairs.get(this) ?? [] };
-            }
-            captured.push(entry);
-            this.addEventListener('load', () => { entry.status = this.status; entry.res = parseResponse(this.responseText); });
-          }
-          return origSend.apply(this, arguments);
-        };
-        window.fetch = async function (input, init) {
-          const req = parseBody(init?.body);
-          const res = await origFetch.apply(this, arguments);
-          if (req) {
-            const h = init?.headers instanceof Headers ? [...init.headers.keys()] : Object.keys(init?.headers ?? {});
-            const entry = { via: 'fetch', req, headers: h.map(k => k.toLowerCase()).sort(), status: res.status };
-            captured.push(entry);
-            try { entry.res = parseResponse(await res.clone().text()); } catch {}
-          }
-          return res;
-        };
-        const scrollAll = () => {
-          window.scrollTo(0, document.documentElement.scrollHeight);
-          for (const el of document.querySelectorAll('*')) {
-            if (el.scrollHeight > el.clientHeight + 50 && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) {
-              el.scrollTop = el.scrollHeight;
-            }
-          }
-        };
-        try {
-          for (let i = 0; i < 8 && !captured.some(c => c.req.name === wantName && c.res); i++) {
-            scrollAll();
-            await new Promise(r => setTimeout(r, 2500));
-          }
-        } finally {
-          XMLHttpRequest.prototype.open = origOpen;
-          XMLHttpRequest.prototype.send = origSend;
-          XMLHttpRequest.prototype.setRequestHeader = origSetHeader;
-          window.fetch = origFetch;
-        }
-
-        // Replay the page's own successful pagination request, changing one
-        // thing at a time, to find which difference makes Threads refuse ours.
-        const replays = [];
-        // Any page request that got the saved list back counts, even with
-        // partial errors: the page's often carries two field_exception errors.
-        const ok = captured.find(c => c.req.name === wantName && c._raw && c.status === 200 &&
-          c.res?.dataKeys?.includes('xdt_text_app_viewer'));
-        if (ok) {
-          const OUR_HEADERS = ['accept', 'content-type', 'x-csrftoken', 'x-fb-friendly-name', 'x-fb-lsd', 'x-ig-app-id'];
-          const send = (body, headers, url = ok._raw.url) => new Promise(resolve => {
-            const x = new XMLHttpRequest();
-            x.open(ok._raw.method, url);
-            for (const [k, v] of headers) x.setRequestHeader(k, v);
-            x.onload = () => resolve({ status: x.status, ...parseResponse(x.responseText) });
-            x.onerror = () => resolve({ status: 'network error' });
-            x.send(body);
-          });
-          const variants = {
-            'A exact replay (control)':     p => p,
-            'B page size 20':               p => { const v = JSON.parse(p.get('variables')); v.first = 20; p.set('variables', JSON.stringify(v)); return p; },
-            'C without fb_dtsg + jazoest':  p => { p.delete('fb_dtsg'); p.delete('jazoest'); return p; },
-            'D only our headers':           p => p,
-          };
-          for (const [label, mutate] of Object.entries(variants)) {
-            const params = mutate(new URLSearchParams(ok._raw.body));
-            const headers = label.startsWith('D')
-              ? ok._raw.headers.filter(([k]) => OUR_HEADERS.includes(k.toLowerCase()))
-              : ok._raw.headers;
-            const r = await send(params.toString(), headers);
-            replays.push({ variant: label, status: r.status, errorCount: r.errorCount ?? null,
-                           error: r.errors?.[0] ?? r.unparsable ?? null, dataKeys: r.dataKeys });
-            await new Promise(res => setTimeout(res, 800));   // don't hammer Threads
-          }
-          // Our request, sent the page's way, and the page's sent ours: which
-          // side of the difference is in the body and which in the transport.
-          const OUR_URL = 'https://www.threads.com/graphql/query';
-          const extra = {};
-          if (ourBody) extra['E our body, page URL + headers'] = () => send(ourBody, ok._raw.headers);
-          extra['F page body, our URL + headers'] = () =>
-            send(ok._raw.body, ok._raw.headers.filter(([k]) => OUR_HEADERS.includes(k.toLowerCase())), OUR_URL);
-          for (const [label, run] of Object.entries(extra)) {
-            const r = await run();
-            replays.push({ variant: label, status: r.status, errorCount: r.errorCount ?? null,
-                           error: r.errors?.[0] ?? r.unparsable ?? null, dataKeys: r.dataKeys });
-            await new Promise(res => setTimeout(res, 800));
-          }
-          // Names only: which shared form fields carry different values.
-          const pageP = new URLSearchParams(ok._raw.body), ourP = new URLSearchParams(ourBody ?? '');
-          const dtsg = pageP.get('fb_dtsg') ?? '';
-          var transport = {
-            pageUrlPath: new URL(ok._raw.url, location.href).pathname,
-            ourUrlPath:  new URL(OUR_URL).pathname,
-            jazoestFormulaMatchesPage: pageP.get('jazoest') === '2' + [...dtsg].reduce((n, c) => n + c.charCodeAt(0), 0),
-            fieldsWithDifferentValues: [...ourP.keys()].filter(k => pageP.has(k) && pageP.get(k) !== ourP.get(k)).sort(),
-            pageAvEqualsPageUser: pageP.get('av') === pageP.get('__user'),
-            pageAvIsZero: pageP.get('av') === '0',
-            pageAvDigits: (pageP.get('av') ?? '').length,
-            pageAvFrom: (() => {
-              const av = pageP.get('av'), hits = [];
-              const cu = (() => { try { return require('CurrentUserInitialData') ?? {}; } catch { return {}; } })();
-              for (const [k, v] of Object.entries(cu)) if (String(v) === av) hits.push(`CurrentUserInitialData.${k}`);
-              try { const a = require('getAsyncParams')('POST'); for (const [k, v] of Object.entries(a)) if (String(v) === av) hits.push(`getAsyncParams.${k}`); } catch {}
-              if ((document.cookie.match(/ds_user_id=([^;]+)/) ?? [])[1] === av) hits.push('ds_user_id cookie');
-              return hits;
-            })(),
-          };
-        }
-        for (const c of captured) delete c._raw;   // nothing with token values leaves the page
-        return { visibility: document.visibilityState, captured: captured.slice(0, 12), replays,
-                 transport: typeof transport === 'undefined' ? null : transport };
-      },
-    });
-  } finally {
-    if (prev?.id && prev.id !== tabId) await chrome.tabs.update(prev.id, { active: true }).catch(() => {});
-  }
-
-  const list = captured?.captured ?? [];
-  // Headers the bridge sends (content/bridge.js handleGQL), lower-cased.
-  const OUR_HEADERS = ['accept', 'content-type', 'x-csrftoken', 'x-fb-friendly-name', 'x-fb-lsd', 'x-ig-app-id'];
-  const ourForm = ours?.formKeys ?? [];
-  const union = key => [...new Set(list.flatMap(c => key(c)))].sort();
-  const summary = {
-    tabVisibility: captured?.visibility,
-    pageRequests: list.map(c => `${c.req.name} -> ${c.status ?? 'pending'}${c.res?.errorCount ? ` (${c.res.errorCount} errors)` : ''}` +
-      ` data keys ${JSON.stringify(c.res?.dataKeys ?? null)}`),
-    formFieldsPageOnly: union(c => c.req.formKeys).filter(k => !ourForm.includes(k)),
-    formFieldsOursOnly: ourForm.filter(k => !union(c => c.req.formKeys).includes(k)),
-    headersPageOnly: union(c => c.headers ?? []).filter(h => !OUR_HEADERS.includes(h)),
-  };
-  // Cursors and long strings are summarised as length + short prefix.
-  const show = v => (typeof v === 'string' && v.length > 24) ? `<${v.length} chars, ${v.slice(0, 6)}…>` : v;
-  const theirs = list.find(c => c.req.name === ours?.name && c.req.variables);
-  if (theirs) {
-    const tv = theirs.req.variables, ov = ours?.variables ?? {};
-    const differing = {};
-    for (const k of new Set([...Object.keys(tv), ...Object.keys(ov)])) {
-      if (JSON.stringify(tv[k]) !== JSON.stringify(ov[k])) differing[k] = { page: show(tv[k]), ours: show(ov[k]) };
-    }
-    summary.pagination = {
-      pageRequestSucceeded: theirs.status === 200 && !theirs.res?.errorCount,
-      response: theirs.res,
-      sameDocId: theirs.req.docId === ours?.docId,
-      variablesThatDiffer: differing,
-    };
-  } else {
-    summary.pagination = 'page did not paginate during the experiment';
-  }
-  summary.transport = captured?.transport;
-  summary.replays = captured?.replays?.length ? captured.replays
-    : 'no successful page pagination request to replay';
-  console.log('[archiver] Page\'s own requests vs ours: ' + JSON.stringify(summary));
-}
-
 // ── page param extraction (MAIN world) ────────────────────────────────────────
 
 /**
@@ -1719,8 +1525,6 @@ async function extractPageParams(tabId) {
       const dtsgLive    = safeGet(() => safeReq('DTSG')?.getToken?.());
       const dtsgInitial = safeGet(() => safeReq('DTSGInitialData')?.token);
       const fbDtsg      = dtsgLive || dtsgInitial;
-      const fbDtsgSource = dtsgLive ? 'DTSG' : dtsgInitial ? 'DTSGInitialData' : 'html';
-      const fbDtsgInitialIsCurrent = Boolean(dtsgLive && dtsgInitial) ? dtsgLive === dtsgInitial : null;
       const __hs  = safeGet(() => siteMod?.haste_session);
       const __hsi = safeGet(() => siteMod?.hsi);
       const __rev = safeGet(() => siteMod?.client_revision ?? siteMod?.clientRevision);
@@ -1736,38 +1540,17 @@ async function extractPageParams(tabId) {
 
       const csrfToken = (document.cookie.match(/csrftoken=([^;]+)/) ?? [])[1] ?? '';
 
-      // The account ID requests are made as (av / __user). Since Oct 21 the
-      // page no longer sends the ds_user_id cookie's ID, and a request made as
-      // that ID gets empty data. Collect every ID the page knows, by source.
-      const cu  = safeReq('CurrentUserInitialData') ?? {};
-      const cuM = safeReq('CurrentUser');
-      const actorCandidates = {};
-      for (const [name, get] of [
-        ['CurrentUserInitialData.ACCOUNT_ID',           () => cu.ACCOUNT_ID],
-        ['CurrentUserInitialData.USER_ID',              () => cu.USER_ID],
-        ['CurrentUserInitialData.NON_FACEBOOK_USER_ID', () => cu.NON_FACEBOOK_USER_ID],
-        ['CurrentUserInitialData.IG_USER_EIMU',         () => cu.IG_USER_EIMU],
-        ['CurrentUser.getID',                           () => cuM?.getID?.()],
-        ['CurrentUser.getAccountID',                    () => cuM?.getAccountID?.()],
-        ['CurrentUser.getPossiblyNonFacebookUserID',    () => cuM?.getPossiblyNonFacebookUserID?.()],
-        ['ds_user_id cookie',                           () => dsUserId],
-      ]) {
-        const v = safeGet(get);
-        if (v && v !== '0' && !Object.values(actorCandidates).includes(v)) actorCandidates[name] = v;
-      }
-      // Meta's own request-parameter builder, then any other numeric ID the
-      // page has, then "0" (logged out / no actor) as a last resort.
-      const asyncParams = (() => { try { return safeReq('getAsyncParams')?.('POST') ?? {}; } catch { return {}; } })();
-      const extra = [['getAsyncParams.av', asyncParams.av], ['getAsyncParams.__user', asyncParams.__user]];
-      for (const [k, v] of Object.entries(cu)) {
-        if (/APP_ID/.test(k)) continue;   // identifies Meta's app, not an account
-        if (typeof v === 'string' || typeof v === 'number') extra.push([`CurrentUserInitialData.${k}`, v]);
-      }
-      for (const [name, raw] of extra) {
-        const v = raw == null ? '' : String(raw);
-        if (/^\d{5,}$/.test(v) && !Object.values(actorCandidates).includes(v)) actorCandidates[name] = v;
-      }
-      if (!Object.values(actorCandidates).includes('0')) actorCandidates['zero'] = '0';
+      // Meta's own request-parameter builder: the shared fields of every
+      // GraphQL request the page sends. av (the account) is added per request
+      // by the page's network layer, from CurrentUser.
+      let asyncParams = null;
+      try {
+        const built = safeReq('getAsyncParams')?.('POST');
+        if (built && typeof built === 'object') {
+          asyncParams = Object.fromEntries(Object.entries(built).map(([k, v]) => [k, String(v)]));
+        }
+      } catch {}
+      const av = safeGet(() => safeReq('CurrentUser')?.getPossiblyNonFacebookUserID?.());
 
       // Extract live doc_ids + provider variable values from Relay modules.
       // Only modules loaded on the current page resolve; missing ones fall
@@ -1802,8 +1585,6 @@ async function extractPageParams(tabId) {
       return {
         lsd:      lsd   || ex(/"LSD",\[\],\{"token":"([^"]+)"/),
         fb_dtsg:  fbDtsg || ex(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/),
-        fbDtsgSource,
-        fbDtsgInitialIsCurrent,
         __hs:     __hs  || ex(/"haste_session":"([^"]+)"/),
         __rev:    __rev || ex(/"client_revision":(\d+)/),
         __s:      __s   || ex(/"session_id":"([^"]+)"/),
@@ -1811,7 +1592,8 @@ async function extractPageParams(tabId) {
         __dyn:    ex(/"dynamic_js_bundle":"([^"]+)"/),
         __csr:    ex(/"client_sr_version":"([^"]+)"/),
         dsUserId,
-        actorCandidates,
+        asyncParams,
+        av,
         csrfToken,
         queries,
       };
