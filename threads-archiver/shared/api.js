@@ -233,7 +233,12 @@ export async function fetchAllSaved(onPage) {
   // Viewer query takes NO plain variables — provider flags only.
   let json  = await gqlQuery('SAVED_VIEWER');
   let saved = json?.data?.xdt_text_app_viewer?.saved_media;
-  if (!saved) throw new AuthError('Could not fetch saved posts — are you logged in to Threads?');
+  // A logged-out session gets xdt_text_app_viewer: null (AuthError above). An
+  // "ok" answer without the saved list means the query itself changed.
+  if (!saved) {
+    throw new Error('GraphQL returned no saved posts for SAVED_VIEWER ' +
+      `(data keys: ${JSON.stringify(Object.keys(json?.data ?? {}))})`);
+  }
 
   // onPage returns false to stop early (incremental sync: nothing new here).
   if (await onPage(saved.edges ?? []) === false) return;

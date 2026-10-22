@@ -2,7 +2,7 @@
  * Background service worker for Threads Archiver (MV3).
  *
  * Responsibilities:
- *  - Alarm-based sync (every 30 min by default)
+ *  - Alarm-based sync (hourly by default)
  *  - Fetch saved posts list → detect new posts
  *  - Fetch thread detail + archive media for each new post
  *  - Delta-reply polling: cheaply detect new replies via reply_count
@@ -24,7 +24,7 @@ import {
 // ── constants ──────────────────────────────────────────────────────────────────
 
 const ALARM_NAME        = 'threads-sync';
-const ALARM_PERIOD_MIN  = 30;
+const ALARM_PERIOD_MIN  = 60;   // each sync loads the Threads page once
 const DELTA_BATCH_SIZE  = 50;   // max post IDs per reply-count request
 
 // ── install / startup ──────────────────────────────────────────────────────────
@@ -44,7 +44,8 @@ chrome.runtime.onStartup.addListener(async () => {
 
 function scheduleAlarm() {
   chrome.alarms.get(ALARM_NAME, existing => {
-    if (!existing) {
+    // Also replace an alarm left by a version with a different period.
+    if (existing?.periodInMinutes !== ALARM_PERIOD_MIN) {
       chrome.alarms.create(ALARM_NAME, {
         delayInMinutes:  1,
         periodInMinutes: ALARM_PERIOD_MIN,
@@ -220,7 +221,7 @@ const COMPAT_PAUSE_AFTER = 3;
 // Errors that mean "Threads no longer matches what this code expects", as
 // opposed to network trouble (retry), a web page (back off) or a logout.
 function isCompatError(e) {
-  return /GraphQL execution error|is not valid JSON|Unexpected token|Unknown query key|HTTP 4\d\d from GraphQL/.test(e?.message ?? '');
+  return /GraphQL execution error|GraphQL returned no|is not valid JSON|Unexpected token|Unknown query key|HTTP 4\d\d from GraphQL/.test(e?.message ?? '');
 }
 
 async function recordCompatFailure() {
@@ -246,21 +247,31 @@ function shortError(e) {
   return first.length > 90 ? first.slice(0, 87) + '…' : first;
 }
 
-// ── daily reload of the Threads tab ───────────────────────────────────────────
-// The /saved tab stays open between syncs (it's where live query IDs come from)
-// and, like any long-lived web app, slowly grows. Reload it once a day.
-const TAB_RELOAD_KEY      = 'threadsTabReloadedAt';
-const TAB_RELOAD_EVERY_MS = 24 * 60 * 60_000;
-
-async function maybeReloadThreadsTab(tabId) {
-  const { [TAB_RELOAD_KEY]: last } = await chrome.storage.local.get(TAB_RELOAD_KEY);
-  if (!last) { await chrome.storage.local.set({ [TAB_RELOAD_KEY]: Date.now() }); return tabId; }
-  if (Date.now() - last < TAB_RELOAD_EVERY_MS) return tabId;
-  console.log('[archiver] Reloading the Threads tab (daily, to release memory)');
-  await chrome.tabs.reload(tabId);
-  await chrome.storage.local.set({ [TAB_RELOAD_KEY]: Date.now() });
-  await new Promise(r => setTimeout(r, 750));   // let it leave the "complete" state first
-  return withTimeout(waitForTabLoad(tabId), 60_000, 'Reloading the Threads tab');
+// ── unload the Threads tab between syncs ─────────────────────────────────────
+// The /saved tab is only needed while a sync runs: live query IDs and tokens
+// come from it. Left loaded, some loads of Threads got stuck running flat out
+// for a day; the container has no GPU, so a tab in front renders on the CPU.
+// After each sync, discard it: it stays in the tab strip using no CPU or
+// memory, and the next sync loads it again. Chrome won't discard the tab in
+// front, so another tab is brought forward first.
+async function releaseThreadsTabs() {
+  try {
+    const tabs = (await chrome.tabs.query({ url: 'https://*.threads.com/*' }))
+      .filter(t => isSavedPage(t.url) && !t.discarded && t.status !== 'unloaded');
+    for (const tab of tabs) {
+      if (tab.active) {
+        const others = (await chrome.tabs.query({ windowId: tab.windowId }))
+          .filter(t => !isSavedPage(t.url))   // bringing one forward would reload it
+          .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+        if (others.length) await chrome.tabs.update(others[0].id, { active: true });
+        else await chrome.tabs.create({ windowId: tab.windowId, active: true });
+      }
+      await chrome.tabs.discard(tab.id);
+      console.log(`[archiver] Unloaded the Threads tab ${tab.id} until the next sync`);
+    }
+  } catch (e) {
+    console.warn('[archiver] Could not unload the Threads tab: ' + e.message);
+  }
 }
 
 let _syncing = false;
@@ -427,6 +438,7 @@ async function runSync() {
     if (run === _syncRun) {
       _pauseRequested = false;
       _syncing = false;
+      await releaseThreadsTabs();
     }
   }
 }
@@ -439,7 +451,7 @@ async function runSync() {
  * can't be read (not logged in / page not loaded).
  */
 async function ensureBridgeReady() {
-  const tabId = await maybeReloadThreadsTab(await findOrCreateThreadsTab());
+  const tabId = await findOrCreateThreadsTab();
   await waitForBridge(tabId);
   setBridgeTab(tabId);
   console.log(`[archiver] Bridge ready on tab ${tabId}`);
@@ -495,6 +507,7 @@ async function refreshThread(code) {
     return { ok: true, mediaMissing: updated.mediaMissing ?? 0, replyCount: updated.replies?.length ?? 0 };
   } finally {
     _syncing = false;
+    await releaseThreadsTabs();
   }
 }
 
@@ -629,6 +642,7 @@ async function runFullRefresh(resumeCodes = null) {
     if (run === _syncRun) {
       _pauseRequested = false;
       _syncing = false;
+      await releaseThreadsTabs();
     }
   }
 }
@@ -889,6 +903,7 @@ async function archiveReply({ pk, code: replyCode, parent }) {
     return { ok: true, code: t.code, replyCount: t.replies?.length ?? 0, mediaMissing: t.mediaMissing ?? 0 };
   } finally {
     _syncing = false;
+    await releaseThreadsTabs();
   }
 }
 
@@ -1713,6 +1728,13 @@ async function findOrCreateThreadsTab() {
   if (complete) {
     console.log(`[archiver] Reusing existing /saved tab ${complete.id}`);
     return complete.id;
+  }
+  // Unloaded after the last sync (see releaseThreadsTabs): load it again.
+  const unloaded = saved.find(t => t.discarded || t.status === 'unloaded');
+  if (unloaded) {
+    console.log(`[archiver] Loading the /saved tab ${unloaded.id}`);
+    await chrome.tabs.reload(unloaded.id);
+    return withTimeout(waitForTabLoad(unloaded.id), 60_000, 'Loading the Threads tab');
   }
   // A /saved tab is loading — wait for it
   if (saved.length) {
