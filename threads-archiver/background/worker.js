@@ -1616,6 +1616,16 @@ async function diagnosePagination() {
             jazoestFormulaMatchesPage: pageP.get('jazoest') === '2' + [...dtsg].reduce((n, c) => n + c.charCodeAt(0), 0),
             fieldsWithDifferentValues: [...ourP.keys()].filter(k => pageP.has(k) && pageP.get(k) !== ourP.get(k)).sort(),
             pageAvEqualsPageUser: pageP.get('av') === pageP.get('__user'),
+            pageAvIsZero: pageP.get('av') === '0',
+            pageAvDigits: (pageP.get('av') ?? '').length,
+            pageAvFrom: (() => {
+              const av = pageP.get('av'), hits = [];
+              const cu = (() => { try { return require('CurrentUserInitialData') ?? {}; } catch { return {}; } })();
+              for (const [k, v] of Object.entries(cu)) if (String(v) === av) hits.push(`CurrentUserInitialData.${k}`);
+              try { const a = require('getAsyncParams')('POST'); for (const [k, v] of Object.entries(a)) if (String(v) === av) hits.push(`getAsyncParams.${k}`); } catch {}
+              if ((document.cookie.match(/ds_user_id=([^;]+)/) ?? [])[1] === av) hits.push('ds_user_id cookie');
+              return hits;
+            })(),
           };
         }
         for (const c of captured) delete c._raw;   // nothing with token values leaves the page
@@ -1745,6 +1755,18 @@ async function extractPageParams(tabId) {
         const v = safeGet(get);
         if (v && v !== '0' && !Object.values(actorCandidates).includes(v)) actorCandidates[name] = v;
       }
+      // Meta's own request-parameter builder, then any other numeric ID the
+      // page has, then "0" (logged out / no actor) as a last resort.
+      const asyncParams = (() => { try { return safeReq('getAsyncParams')?.('POST') ?? {}; } catch { return {}; } })();
+      const extra = [['getAsyncParams.av', asyncParams.av], ['getAsyncParams.__user', asyncParams.__user]];
+      for (const [k, v] of Object.entries(cu)) {
+        if (typeof v === 'string' || typeof v === 'number') extra.push([`CurrentUserInitialData.${k}`, v]);
+      }
+      for (const [name, raw] of extra) {
+        const v = raw == null ? '' : String(raw);
+        if (/^\d{5,}$/.test(v) && !Object.values(actorCandidates).includes(v)) actorCandidates[name] = v;
+      }
+      if (!Object.values(actorCandidates).includes('0')) actorCandidates['zero'] = '0';
 
       // Extract live doc_ids + provider variable values from Relay modules.
       // Only modules loaded on the current page resolve; missing ones fall
