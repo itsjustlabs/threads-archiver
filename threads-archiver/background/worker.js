@@ -1760,6 +1760,7 @@ async function extractPageParams(tabId) {
       const asyncParams = (() => { try { return safeReq('getAsyncParams')?.('POST') ?? {}; } catch { return {}; } })();
       const extra = [['getAsyncParams.av', asyncParams.av], ['getAsyncParams.__user', asyncParams.__user]];
       for (const [k, v] of Object.entries(cu)) {
+        if (/APP_ID/.test(k)) continue;   // identifies Meta's app, not an account
         if (typeof v === 'string' || typeof v === 'number') extra.push([`CurrentUserInitialData.${k}`, v]);
       }
       for (const [name, raw] of extra) {
