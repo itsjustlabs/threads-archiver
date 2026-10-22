@@ -1547,7 +1547,10 @@ async function diagnosePagination() {
         // Replay the page's own successful pagination request, changing one
         // thing at a time, to find which difference makes Threads refuse ours.
         const replays = [];
-        const ok = captured.find(c => c.req.name === wantName && c._raw && c.status === 200 && !c.res?.errorCount);
+        // Any page request that got the saved list back counts, even with
+        // partial errors: the page's often carries two field_exception errors.
+        const ok = captured.find(c => c.req.name === wantName && c._raw && c.status === 200 &&
+          c.res?.dataKeys?.includes('xdt_text_app_viewer'));
         if (ok) {
           const OUR_HEADERS = ['accept', 'content-type', 'x-csrftoken', 'x-fb-friendly-name', 'x-fb-lsd', 'x-ig-app-id'];
           const send = (body, headers, url = ok._raw.url) => new Promise(resolve => {
